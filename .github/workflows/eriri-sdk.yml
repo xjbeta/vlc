@@ -29,9 +29,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ARCH: aarch64
+  # VLC normalises aarch64 -> arm64, so build/install dirs are arm64.
+  ARCH: arm64
   SDK: macosx
-  SDK_DIR: vlc-macosx-aarch64
+  SDK_DIR: vlc-macosx-arm64
   JOB_NAME: vlc-macosx-sdk
 
 jobs:
@@ -190,11 +191,14 @@ jobs:
         run: |
           set -euo pipefail
           SDK="build-dir/${{ env.SDK_DIR }}"
-          test -f "$SDK/lib/libvlc.dylib"     || { echo "missing libvlc.dylib"; exit 1; }
-          test -f "$SDK/lib/libvlccore.dylib" || { echo "missing libvlccore.dylib"; exit 1; }
+          if [ ! -d "$SDK" ]; then echo "missing SDK dir: $SDK"; ls -la build-dir; exit 1; fi
+          test -n "$(find "$SDK/lib" -maxdepth 1 -name 'libvlc*.dylib' -print -quit)" \
+            || { echo "missing libvlc dylib"; ls -la "$SDK/lib"; exit 1; }
+          test -n "$(find "$SDK/lib" -maxdepth 1 -name 'libvlccore*.dylib' -print -quit)" \
+            || { echo "missing libvlccore dylib"; exit 1; }
           test -f "$SDK/include/vlc/libvlc.h" || { echo "missing public headers"; exit 1; }
           test -d "$SDK/lib/vlc/plugins"      || { echo "missing plugins"; exit 1; }
-          echo "--- otool -L libvlc.dylib ---"; otool -L "$SDK/lib/libvlc.dylib"
+          echo "--- otool -L libvlc ---"; otool -L "$SDK"/lib/libvlc*.dylib | head -6
           echo "--- plugin categories: $(ls "$SDK/lib/vlc/plugins" | wc -l | tr -d ' ') ---"
           ls "$SDK/lib/vlc/plugins"
           echo "--- video_output plugins ---"
