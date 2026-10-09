@@ -15,11 +15,8 @@
 
 name: Build VLC macOS SDK (eriri-sdk)
 
+# Manual only: run from the Actions tab ("Run workflow") on any branch/ref.
 on:
-  push:
-    branches: [eriri-sdk]
-  pull_request:
-    branches: [eriri-sdk]
   workflow_dispatch:
 
 permissions:
