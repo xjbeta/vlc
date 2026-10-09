@@ -1,0 +1,224 @@
+# Build the Eriri VLC macOS SDK (shared libvlc + plugins) on the eriri-sdk branch.
+#
+# Produces the same layout the app consumes at Eriri/vlc-macos-sdk:
+#   <workspace>/build-dir/vlc-macosx-aarch64/{bin,include,lib,share}
+#
+# It uses VLC's own Apple helper, which supports a shared build (the "full
+# static library" note at the top of build.sh is stale):
+#   extras/package/apple/build.sh --arch=aarch64 --sdk=macosx --enable-shared
+# With --enable-shared the script runs `make install` and exits before the
+# static bundling / module stripping, i.e. it emits exactly the official SDK
+# shape (dylibs + lib/vlc/plugins).
+#
+# Eriri patches (e.g. the samplebufferdisplay black-bars fix) are commits on
+# this branch, so the build picks them up automatically.
+
+name: Build VLC macOS SDK (eriri-sdk)
+
+on:
+  push:
+    branches: [eriri-sdk]
+  pull_request:
+    branches: [eriri-sdk]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARCH: aarch64
+  SDK: macosx
+  SDK_DIR: vlc-macosx-aarch64
+  JOB_NAME: vlc-macosx-sdk
+
+jobs:
+  build-sdk:
+    name: Build macOS SDK (shared, ${{ github.ref_name }})
+    runs-on: macos-26
+    # libvlc + contrib compilation is very slow on a cold cache.
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        shell: zsh {0}
+        run: |
+          XCODE="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+
+      - name: Resolve revision
+        id: rev
+        shell: zsh {0}
+        run: |
+          echo "sha=$(git rev-parse --short=10 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Building $(git describe --tags --always 2>/dev/null || git rev-parse --short HEAD)"
+
+      # --------------------------------------------------------------- caches
+      # 1) extras/tools (autoconf, pkg-config, cmake, meson, ...). Small but slow.
+      - name: Restore VLC build tools
+        id: cache-tools
+        uses: actions/cache/restore@v4
+        with:
+          path: extras/tools/build
+          key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
+          restore-keys: |
+            ${{ runner.os }}-vlc-tools-
+
+      # 2) Contribs: the slowest part (ffmpeg, ...). Keyed on the Apple build
+      #    config; restore-keys let a stale cache continue incrementally.
+      - name: Restore VLC contribs
+        id: cache-contrib
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            contrib/contrib-${{ env.ARCH }}-*
+            contrib/${{ env.ARCH }}-${{ env.SDK }}
+          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ hashFiles('extras/package/apple/build.conf') }}
+          restore-keys: |
+            ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-
+
+      # 3) Incremental VLC compile tree (object files / generated headers).
+      - name: Restore VLC build
+        id: cache-build
+        uses: actions/cache/restore@v4
+        with:
+          path: build-dir/build
+          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}
+          restore-keys: |
+            ${{ runner.os }}-vlc-build-${{ env.ARCH }}-
+
+      # 4) ccache (wired in via VLC_CCACHE_BINS_PATH below).
+      - name: Restore ccache
+        id: cache-ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ccache-${{ env.ARCH }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ env.ARCH }}-
+
+      # ------------------------------------------------------------ toolchain
+      - name: Prepare toolchain (GNU make 4.4 + ccache)
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          brew install make ccache
+
+          # Apple's make 3.81 uses a pipe jobserver that ninja >= 1.13 rejects
+          # ("Could not initialize jobserver: Invalid file descriptors").
+          # VLC prepends $VLC_PATH to PATH, so GNU make 4.4 wins.
+          GNUBIN="$(brew --prefix make)/libexec/gnubin"
+          mkdir -p "$RUNNER_TEMP/vlc-tools"
+          ln -sf "$GNUBIN/make" "$RUNNER_TEMP/vlc-tools/make"
+          echo "VLC_PATH=$RUNNER_TEMP/vlc-tools" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/vlc-tools/make" --version | head -1
+
+          # ccache is picked up natively via VLC_CCACHE_BINS_PATH; the wrapper
+          # names must be exactly cc / c++.
+          CCACHE_BIN="$(brew --prefix ccache)/bin/ccache"
+          mkdir -p "$RUNNER_TEMP/ccache-bins"
+          ln -sf "$CCACHE_BIN" "$RUNNER_TEMP/ccache-bins/cc"
+          ln -sf "$CCACHE_BIN" "$RUNNER_TEMP/ccache-bins/c++"
+          echo "VLC_CCACHE_BINS_PATH=$RUNNER_TEMP/ccache-bins" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          "$CCACHE_BIN" --version | head -1
+
+      # ---------------------------------------------------------------- build
+      - name: Build macOS SDK (shared)
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build-dir
+          cd build-dir
+          ../extras/package/apple/build.sh \
+            --arch=${{ env.ARCH }} \
+            --sdk=${{ env.SDK }} \
+            --enable-shared
+
+      - name: Show ccache stats
+        if: always()
+        shell: zsh {0}
+        run: ccache -s || true
+
+      # --------------------------------------------------------------- verify
+      - name: Verify SDK
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SDK="build-dir/${{ env.SDK_DIR }}"
+          test -f "$SDK/lib/libvlc.dylib"     || { echo "missing libvlc.dylib"; exit 1; }
+          test -f "$SDK/lib/libvlccore.dylib" || { echo "missing libvlccore.dylib"; exit 1; }
+          test -f "$SDK/include/vlc/libvlc.h" || { echo "missing public headers"; exit 1; }
+          test -d "$SDK/lib/vlc/plugins"      || { echo "missing plugins"; exit 1; }
+          echo "--- otool -L libvlc.dylib ---"; otool -L "$SDK/lib/libvlc.dylib"
+          echo "--- plugin categories: $(ls "$SDK/lib/vlc/plugins" | wc -l | tr -d ' ') ---"
+          ls "$SDK/lib/vlc/plugins"
+          echo "--- video_output plugins ---"
+          ls "$SDK/lib/vlc/plugins/video_output" 2>/dev/null || true
+
+      - name: Package SDK
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SDK="build-dir/${{ env.SDK_DIR }}"
+          OUT="${{ env.JOB_NAME }}-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}.tar.xz"
+          tar -C "$(dirname "$SDK")" -cJf "$OUT" "$(basename "$SDK")"
+          shasum -a 256 "$OUT" | tee "$OUT.sha256"
+          echo "SDK_ARCHIVE=$OUT" >> "$GITHUB_ENV"
+
+      - name: Upload SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.JOB_NAME }}-${{ env.ARCH }}
+          path: |
+            ${{ env.JOB_NAME }}-${{ env.ARCH }}-*.tar.xz
+            ${{ env.JOB_NAME }}-${{ env.ARCH }}-*.tar.xz.sha256
+          if-no-files-found: error
+
+      # ----------------------------------------------------------------- save
+      # Save even when the build failed, so a red run does not force a full
+      # rebuild next time (mirrors the VLCKit workflow). continue-on-error
+      # guards the rare "cache already exists" race.
+      - name: Save VLC build tools
+        if: always() && steps.cache-tools.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: extras/tools/build
+          key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
+
+      - name: Save VLC contribs
+        if: always() && steps.cache-contrib.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            contrib/contrib-${{ env.ARCH }}-*
+            contrib/${{ env.ARCH }}-${{ env.SDK }}
+          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ hashFiles('extras/package/apple/build.conf') }}
+
+      - name: Save VLC build
+        if: always() && steps.cache-build.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: build-dir/build
+          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}
+
+      - name: Save ccache
+        if: always() && steps.cache-ccache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ccache-${{ env.ARCH }}-${{ github.sha }}
