@@ -127,16 +127,25 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          brew install make ccache
+          brew install make ccache ninja
 
-          # Apple's make 3.81 uses a pipe jobserver that ninja >= 1.13 rejects
-          # ("Could not initialize jobserver: Invalid file descriptors").
-          # VLC prepends $VLC_PATH to PATH, so GNU make 4.4 wins.
+          # The whole build (extras/tools bootstrap, contribs, VLC) must use
+          # GNU make 4.4. Apple's make 3.81 uses a pipe jobserver whose fds are
+          # not inherited through cmake into ninja, which then dies with
+          # "Could not initialize jobserver: Invalid file descriptors".
+          # GNU make 4.4 uses a FIFO jobserver that ninja understands, and
+          # extras/tools/bootstrap picks its ninja variant based on `make -v`.
+          #
+          # VLC only injects $VLC_PATH into PATH inside vlcSetBaseEnvironment(),
+          # which runs at configure time — after the tools/contrib phases. So
+          # also prepend it via GITHUB_PATH so make resolves to 4.4 everywhere.
           GNUBIN="$(brew --prefix make)/libexec/gnubin"
           mkdir -p "$RUNNER_TEMP/vlc-tools"
           ln -sf "$GNUBIN/make" "$RUNNER_TEMP/vlc-tools/make"
           echo "VLC_PATH=$RUNNER_TEMP/vlc-tools" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/vlc-tools" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/vlc-tools/make" --version | head -1
+          "$(brew --prefix ninja)/bin/ninja" --version
 
           # ccache is picked up natively via VLC_CCACHE_BINS_PATH; the wrapper
           # names must be exactly cc / c++.
