@@ -1,0 +1,65 @@
+From cb41115d2b959904ee2b8f9942b7d7e4555985f8 Mon Sep 17 00:00:00 2001
+From: xjbeta <xjbeta.tiny@gmail.com>
+Date: Sat, 10 Oct 2026 03:48:41 +0800
+Subject: [PATCH] vout/vsbd: crop to the visible region via clean aperture
+
+AVSampleBufferDisplayLayer fits the whole coded frame into the view
+(AVLayerVideoGravityResizeAspect), but coded dimensions are aligned to the
+codec block size, so a 1080p HEVC stream is decoded as 1920x1088 and the
+extra 8 rows show up as ~7pt pillarbox bars on each side.
+
+Set kCVImageBufferCleanApertureKey (visible width/height plus the offset
+from the centre of the coded frame) on the pixel buffer before building the
+format description, so the layer crops to the visible picture. Only applied
+for unrotated output where visible < coded.
+---
+ .../apple/VLCSampleBufferDisplay.m            | 33 +++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/modules/video_output/apple/VLCSampleBufferDisplay.m b/modules/video_output/apple/VLCSampleBufferDisplay.m
+index c59e87bdbf..ea7e08ce71 100644
+--- a/modules/video_output/apple/VLCSampleBufferDisplay.m
++++ b/modules/video_output/apple/VLCSampleBufferDisplay.m
+@@ -1135,6 +1135,39 @@ static void RenderPicture(vout_display_t *vd, picture_t *pic, vlc_tick_t date) {
+         kCVAttachmentMode_ShouldPropagate
+     );
+ 
++    /* Coded video dimensions are aligned to the codec's macroblock/CTU size,
++     * so the pixel buffer (e.g. 1920x1088 for a 1080p HEVC stream) is larger
++     * than the visible picture. AVSampleBufferDisplayLayer fits the whole
++     * coded frame into the view (AVLayerVideoGravityResizeAspect), which
++     * leaves pillarbox/letterbox bars. Convey the visible region as a clean
++     * aperture so the layer crops to it. The offset is measured from the
++     * centre of the coded frame, in pixels. */
++    if (vd->fmt->orientation == ORIENT_NORMAL &&
++        vd->source != NULL &&
++        (vd->source->i_visible_width < vd->source->i_width ||
++         vd->source->i_visible_height < vd->source->i_height))
++    {
++        const video_format_t *src = vd->source;
++        NSDictionary *cleanAperture = @{
++            (__bridge NSString*)kCVImageBufferCleanApertureWidthKey:
++                @(src->i_visible_width),
++            (__bridge NSString*)kCVImageBufferCleanApertureHeightKey:
++                @(src->i_visible_height),
++            (__bridge NSString*)kCVImageBufferCleanApertureHorizontalOffsetKey:
++                @(src->i_x_offset + src->i_visible_width / 2.0 -
++                  src->i_width / 2.0),
++            (__bridge NSString*)kCVImageBufferCleanApertureVerticalOffsetKey:
++                @(src->i_y_offset + src->i_visible_height / 2.0 -
++                  src->i_height / 2.0),
++        };
++        CVBufferSetAttachment(
++            pixelBuffer,
++            kCVImageBufferCleanApertureKey,
++            (__bridge CFDictionaryRef)cleanAperture,
++            kCVAttachmentMode_ShouldPropagate
++        );
++    }
++
+     CMSampleBufferRef sampleBuffer = NULL;
+     CMVideoFormatDescriptionRef formatDesc = NULL;
+     OSStatus err = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDesc);
+-- 
+2.56.0
+
