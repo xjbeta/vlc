@@ -147,6 +147,14 @@ jobs:
           "$RUNNER_TEMP/vlc-tools/make" --version | head -1
           "$(brew --prefix ninja)/bin/ninja" --version
 
+          # pkg-config is the brew one, so its pkg.m4 lives in the formula's
+          # aclocal dir. VLC's own aclocal does not search it, and contribs
+          # that run autoreconf (e.g. lame) then fail with
+          #   configure: syntax error near unexpected token `SNDFILE,'
+          # because PKG_CHECK_MODULES is left unexpanded. contrib/src/main.mak
+          # appends $ACLOCAL_PATH, so exporting it here fixes that.
+          echo "ACLOCAL_PATH=$(brew --prefix)/share/aclocal" >> "$GITHUB_ENV"
+
           # ccache is picked up natively via VLC_CCACHE_BINS_PATH; the wrapper
           # names must be exactly cc / c++.
           CCACHE_BIN="$(brew --prefix ccache)/bin/ccache"
