@@ -1,0 +1,193 @@
+# Build the arm64-macosx VLC contribs once per version and publish them as a
+# GitHub Release asset, so the SDK workflow can reuse them instead of
+# rebuilding ~20 minutes of contribs (and instead of relying on a ~2 GB
+# Actions cache, which proved unreliable).
+#
+# "Version" = hash of the contrib source tree (git rev-parse HEAD:contrib)
+# plus a hash of eriri/build.conf. When either changes the tag changes and a
+# fresh build is published.
+#
+# Run this manually (Actions -> "Build VLC contribs" -> Run workflow) before
+# the SDK workflow; the SDK workflow downloads the release asset when it
+# exists.
+
+name: Build VLC contribs (arm64-macosx)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild and overwrite even if the release already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: contrib-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ARCH: arm64
+  SDK: macosx
+
+jobs:
+  contrib:
+    name: Build contribs (${{ github.ref_name }})
+    runs-on: macos-26
+    # Contrib compilation is very slow on a cold cache.
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        shell: zsh {0}
+        run: |
+          XCODE="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+
+      - name: Resolve contrib version
+        id: v
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          CKEY="$(git rev-parse HEAD:contrib | cut -c1-12)"
+          BKEY="$(shasum -a 256 eriri/build.conf | cut -c1-8)"
+          TAG="contrib-${{ env.ARCH }}-${{ env.SDK }}-${CKEY}-${BKEY}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version tag: ${TAG}"
+
+      - name: Skip if already published
+        id: check
+        shell: zsh {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.force }}" != "true" ] \
+             && gh release view "${{ steps.v.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=1" >> "$GITHUB_OUTPUT"
+            echo "already published: ${{ steps.v.outputs.tag }}"
+          else
+            echo "exists=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore VLC build tools
+        if: steps.check.outputs.exists != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            extras/tools/build
+            extras/tools/*.tar.*
+          key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
+          restore-keys: |
+            ${{ runner.os }}-vlc-tools-
+
+      - name: Restore ccache
+        if: steps.check.outputs.exists != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ccache-${{ env.ARCH }}-contrib-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ env.ARCH }}-
+
+      - name: Prepare toolchain (GNU make 4.4 + ccache)
+        if: steps.check.outputs.exists != '1'
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          brew install make ccache ninja
+
+          # GNU make 4.4 everywhere (Apple make 3.81 breaks ninja's jobserver).
+          GNUBIN="$(brew --prefix make)/libexec/gnubin"
+          mkdir -p "$RUNNER_TEMP/vlc-tools"
+          ln -sf "$GNUBIN/make" "$RUNNER_TEMP/vlc-tools/make"
+          echo "VLC_PATH=$RUNNER_TEMP/vlc-tools" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/vlc-tools" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/vlc-tools/make" --version | head -1
+
+          # contribs that run autoreconf (lame) need pkg.m4 from brew.
+          echo "ACLOCAL_PATH=$(brew --prefix)/share/aclocal" >> "$GITHUB_ENV"
+
+          CCACHE_BIN="$(brew --prefix ccache)/bin/ccache"
+          mkdir -p "$RUNNER_TEMP/ccache-bins"
+          ln -sf "$CCACHE_BIN" "$RUNNER_TEMP/ccache-bins/cc"
+          ln -sf "$CCACHE_BIN" "$RUNNER_TEMP/ccache-bins/c++"
+          echo "VLC_CCACHE_BINS_PATH=$RUNNER_TEMP/ccache-bins" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+
+      - name: Build contribs
+        if: steps.check.outputs.exists != '1'
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build-dir
+          cd build-dir
+          ../extras/package/apple/build.sh \
+            --arch=${{ env.ARCH }} \
+            --sdk=${{ env.SDK }} \
+            --enable-shared \
+            --config="$GITHUB_WORKSPACE/eriri/build.conf"
+
+      - name: Package contribs
+        if: steps.check.outputs.exists != '1'
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          OUT="contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst"
+          tar -I 'zstd -T0 -3' -cf "$OUT" \
+            -C "$GITHUB_WORKSPACE" \
+              contrib/contrib-${{ env.ARCH }}-* \
+              contrib/${{ env.ARCH }}-${{ env.SDK }} \
+              contrib/tarballs \
+            -C "$HOME" \
+              .cargo/bin/cargo-capi .cargo/bin/cargo-cbuild \
+              .cargo/bin/cargo-cinstall .cargo/bin/cargo-ctest
+          shasum -a 256 "$OUT" | tee "$OUT.sha256"
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+
+      - name: Publish release asset
+        if: steps.check.outputs.exists != '1'
+        shell: zsh {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.v.outputs.tag }}" "$OUT" "$OUT.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${{ steps.v.outputs.tag }}" \
+            --notes "Prebuilt arm64-macosx VLC contribs for ${{ steps.v.outputs.tag }}."
+          echo "published ${{ steps.v.outputs.tag }}"
+
+      - name: Upload artifact
+        if: steps.check.outputs.exists != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: contrib-${{ env.ARCH }}-${{ env.SDK }}
+          path: contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst*
+          if-no-files-found: error
+
+      - name: Save VLC build tools
+        if: always() && steps.check.outputs.exists != '1'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            extras/tools/build
+            extras/tools/*.tar.*
+          key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
+
+      - name: Save ccache
+        if: always() && steps.check.outputs.exists != '1'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ccache-${{ env.ARCH }}-contrib-${{ github.run_id }}

@@ -79,7 +79,40 @@ jobs:
             exit 1
           fi
 
+      # Reuse the contribs built once by the "Build VLC contribs" workflow and
+      # published as a release asset. If the asset is not there yet, the build
+      # below falls back to building contribs inline.
+      - name: Fetch prebuilt contribs
+        id: prebuilt
+        shell: zsh {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CKEY="$(git rev-parse HEAD:contrib | cut -c1-12)"
+          BKEY="$(shasum -a 256 eriri/build.conf | cut -c1-8)"
+          TAG="contrib-${{ env.ARCH }}-${{ env.SDK }}-${CKEY}-${BKEY}"
+          echo "tag=${TAG}"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "no release '$TAG' yet; contribs will be built inline"
+            echo "hit=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p '*.tar.zst' -D "$RUNNER_TEMP/contrib"
+          mkdir -p "$RUNNER_TEMP/cpkg"
+          tar -I zstd -xf "$RUNNER_TEMP/contrib/"*.tar.zst -C "$RUNNER_TEMP/cpkg"
+          cp -a "$RUNNER_TEMP/cpkg/contrib/." contrib/
+          if [ -d "$RUNNER_TEMP/cpkg/.cargo/bin" ]; then
+            mkdir -p "$HOME/.cargo/bin"
+            cp -a "$RUNNER_TEMP/cpkg/.cargo/bin/." "$HOME/.cargo/bin/"
+          fi
+          echo "hit=1" >> "$GITHUB_OUTPUT"
+          echo "reused prebuilt contribs from $TAG"
+
       # --------------------------------------------------------------- caches
+      # Contribs are NOT cached here; they are built once by the "Build VLC
+      # contribs" workflow and fetched as a release asset (see the fetch step
+      # above), with an inline build as fallback.
       # 1) extras/tools (autoconf, pkg-config, cmake, meson, ...). Small but slow.
       - name: Restore VLC build tools
         id: cache-tools
@@ -90,23 +123,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-vlc-tools-
 
-      # 2) Contribs: the slowest part (ffmpeg, ...). Lenient: a rolling key
-      #    plus prefix restore-keys always reuse the most recent cache, and
-      #    the incremental contrib make fills in whatever changed. Our VLC
-      #    patches never touch contribs, so they never bust this cache.
-      - name: Restore VLC contribs
-        id: cache-contrib
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            contrib/contrib-${{ env.ARCH }}-*
-            contrib/${{ env.ARCH }}-${{ env.SDK }}
-            ~/.cargo/bin/cargo-c*
-          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-
-
-      # 3) Incremental VLC compile tree. Rolling key so patch edits reuse the
+      # 2) Incremental VLC compile tree. Rolling key so patch edits reuse the
       #    previous tree; make recompiles only the files our patches touched.
       - name: Restore VLC build
         id: cache-build
@@ -117,7 +134,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-vlc-build-${{ env.ARCH }}-
 
-      # 4) ccache (wired in via VLC_CCACHE_BINS_PATH below).
+      # 3) ccache (wired in via VLC_CCACHE_BINS_PATH below).
       - name: Restore ccache
         id: cache-ccache
         uses: actions/cache/restore@v4
@@ -247,17 +264,6 @@ jobs:
         with:
           path: extras/tools/build
           key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
-
-      - name: Save VLC contribs
-        if: always() && steps.cache-contrib.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            contrib/contrib-${{ env.ARCH }}-*
-            contrib/${{ env.ARCH }}-${{ env.SDK }}
-            ~/.cargo/bin/cargo-c*
-          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ github.run_id }}
 
       - name: Save VLC build
         if: always() && steps.cache-build.outputs.cache-hit != 'true'
