@@ -90,8 +90,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-vlc-tools-
 
-      # 2) Contribs: the slowest part (ffmpeg, ...). Keyed on the Apple build
-      #    config; restore-keys let a stale cache continue incrementally.
+      # 2) Contribs: the slowest part (ffmpeg, ...). Lenient: a rolling key
+      #    plus prefix restore-keys always reuse the most recent cache, and
+      #    the incremental contrib make fills in whatever changed. Our VLC
+      #    patches never touch contribs, so they never bust this cache.
       - name: Restore VLC contribs
         id: cache-contrib
         uses: actions/cache/restore@v4
@@ -99,17 +101,18 @@ jobs:
           path: |
             contrib/contrib-${{ env.ARCH }}-*
             contrib/${{ env.ARCH }}-${{ env.SDK }}
-          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ hashFiles('eriri/build.conf') }}
+          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-
 
-      # 3) Incremental VLC compile tree (object files / generated headers).
+      # 3) Incremental VLC compile tree. Rolling key so patch edits reuse the
+      #    previous tree; make recompiles only the files our patches touched.
       - name: Restore VLC build
         id: cache-build
         uses: actions/cache/restore@v4
         with:
           path: build-dir/build
-          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}-${{ hashFiles('eriri/build.conf') }}-${{ hashFiles('patches/*.patch') }}
+          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-vlc-build-${{ env.ARCH }}-
 
@@ -119,7 +122,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-ccache-${{ env.ARCH }}-${{ github.sha }}
+          key: ${{ runner.os }}-ccache-${{ env.ARCH }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-ccache-${{ env.ARCH }}-
 
@@ -244,7 +247,7 @@ jobs:
           path: |
             contrib/contrib-${{ env.ARCH }}-*
             contrib/${{ env.ARCH }}-${{ env.SDK }}
-          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ hashFiles('eriri/build.conf') }}
+          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ github.run_id }}
 
       - name: Save VLC build
         if: always() && steps.cache-build.outputs.cache-hit != 'true'
@@ -252,7 +255,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: build-dir/build
-          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}-${{ hashFiles('eriri/build.conf') }}-${{ hashFiles('patches/*.patch') }}
+          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ github.run_id }}
 
       - name: Save ccache
         if: always() && steps.cache-ccache.outputs.cache-hit != 'true'
@@ -260,4 +263,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-ccache-${{ env.ARCH }}-${{ github.sha }}
+          key: ${{ runner.os }}-ccache-${{ env.ARCH }}-${{ github.run_id }}
