@@ -99,7 +99,7 @@ jobs:
           path: |
             contrib/contrib-${{ env.ARCH }}-*
             contrib/${{ env.ARCH }}-${{ env.SDK }}
-          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ hashFiles('extras/package/apple/build.conf') }}
+          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ hashFiles('eriri/build.conf') }}
           restore-keys: |
             ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-
 
@@ -109,7 +109,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build-dir/build
-          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}-${{ hashFiles('patches/*.patch') }}
+          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}-${{ hashFiles('eriri/build.conf') }}-${{ hashFiles('patches/*.patch') }}
           restore-keys: |
             ${{ runner.os }}-vlc-build-${{ env.ARCH }}-
 
@@ -178,7 +178,8 @@ jobs:
           ../extras/package/apple/build.sh \
             --arch=${{ env.ARCH }} \
             --sdk=${{ env.SDK }} \
-            --enable-shared
+            --enable-shared \
+            --config="$GITHUB_WORKSPACE/eriri/build.conf"
 
       - name: Show ccache stats
         if: always()
@@ -243,7 +244,7 @@ jobs:
           path: |
             contrib/contrib-${{ env.ARCH }}-*
             contrib/${{ env.ARCH }}-${{ env.SDK }}
-          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ hashFiles('extras/package/apple/build.conf') }}
+          key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ hashFiles('eriri/build.conf') }}
 
       - name: Save VLC build
         if: always() && steps.cache-build.outputs.cache-hit != 'true'
@@ -251,7 +252,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: build-dir/build
-          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}-${{ hashFiles('patches/*.patch') }}
+          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}-${{ hashFiles('eriri/build.conf') }}-${{ hashFiles('patches/*.patch') }}
 
       - name: Save ccache
         if: always() && steps.cache-ccache.outputs.cache-hit != 'true'
