@@ -101,6 +101,7 @@ jobs:
           path: |
             contrib/contrib-${{ env.ARCH }}-*
             contrib/${{ env.ARCH }}-${{ env.SDK }}
+            ~/.cargo/bin/cargo-c*
           key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-
@@ -158,6 +159,14 @@ jobs:
           # because PKG_CHECK_MODULES is left unexpanded. contrib/src/main.mak
           # appends $ACLOCAL_PATH, so exporting it here fixes that.
           echo "ACLOCAL_PATH=$(brew --prefix)/share/aclocal" >> "$GITHUB_ENV"
+
+          # The cached contrib build tree carries stamps for tools installed
+          # outside the tree (cargo-c lands in ~/.cargo/bin). If that binary is
+          # missing, drop the stamp so contrib rebuilds it instead of invoking
+          # a tool that is not there ("cargo: no such command: capi").
+          if ! command -v cargo-capi >/dev/null 2>&1; then
+            find contrib \( -name '.cargo-c' -o -name '.dep-cargo-c' \) -delete 2>/dev/null || true
+          fi
 
           # ccache is picked up natively via VLC_CCACHE_BINS_PATH; the wrapper
           # names must be exactly cc / c++.
@@ -247,6 +256,7 @@ jobs:
           path: |
             contrib/contrib-${{ env.ARCH }}-*
             contrib/${{ env.ARCH }}-${{ env.SDK }}
+            ~/.cargo/bin/cargo-c*
           key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ github.run_id }}
 
       - name: Save VLC build
