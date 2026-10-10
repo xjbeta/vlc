@@ -1,15 +1,18 @@
 # Build the arm64-macosx VLC contribs once per version and publish them as a
 # GitHub Release asset, so the SDK workflow can reuse them instead of
-# rebuilding ~20 minutes of contribs (and instead of relying on a ~2 GB
-# Actions cache, which proved unreliable).
+# rebuilding ~20 minutes of contribs (and instead of relying on a fragile
+# Actions cache).
+#
+# The asset is VLC's native prebuilt-contribs package (build.sh
+# --package-contribs -> make package): it holds only the contrib install
+# prefix, which is all VLC links against.
 #
 # "Version" = hash of the contrib source tree (git rev-parse HEAD:contrib)
 # plus a hash of eriri/contrib.conf. When either changes the tag changes and a
 # fresh build is published.
 #
 # Run this manually (Actions -> "Build VLC contribs" -> Run workflow) before
-# the SDK workflow; the SDK workflow downloads the release asset when it
-# exists.
+# the SDK workflow; the SDK workflow consumes the release asset when it exists.
 
 name: Build VLC contribs (arm64-macosx)
 
