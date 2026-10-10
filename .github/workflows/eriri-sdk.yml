@@ -85,7 +85,9 @@ jobs:
         id: cache-tools
         uses: actions/cache/restore@v4
         with:
-          path: extras/tools/build
+          path: |
+            extras/tools/build
+            extras/tools/*.tar.*
           key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
           restore-keys: |
             ${{ runner.os }}-vlc-tools-
@@ -101,6 +103,7 @@ jobs:
           path: |
             contrib/contrib-${{ env.ARCH }}-*
             contrib/${{ env.ARCH }}-${{ env.SDK }}
+            contrib/tarballs
             ~/.cargo/bin/cargo-c*
           key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ github.run_id }}
           restore-keys: |
@@ -245,7 +248,9 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
-          path: extras/tools/build
+          path: |
+            extras/tools/build
+            extras/tools/*.tar.*
           key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
 
       - name: Save VLC contribs
@@ -256,6 +261,7 @@ jobs:
           path: |
             contrib/contrib-${{ env.ARCH }}-*
             contrib/${{ env.ARCH }}-${{ env.SDK }}
+            contrib/tarballs
             ~/.cargo/bin/cargo-c*
           key: ${{ runner.os }}-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-${{ github.run_id }}
 
