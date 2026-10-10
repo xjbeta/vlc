@@ -100,7 +100,7 @@ jobs:
           fi
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p '*.tar.zst' -D "$RUNNER_TEMP/contrib"
           mkdir -p "$RUNNER_TEMP/cpkg"
-          tar -I zstd -xf "$RUNNER_TEMP/contrib/"*.tar.zst -C "$RUNNER_TEMP/cpkg"
+          zstd -dc "$RUNNER_TEMP/contrib/"*.tar.zst | tar -xf - -C "$RUNNER_TEMP/cpkg"
           cp -a "$RUNNER_TEMP/cpkg/contrib/." contrib/
           if [ -d "$RUNNER_TEMP/cpkg/.cargo/bin" ]; then
             mkdir -p "$HOME/.cargo/bin"

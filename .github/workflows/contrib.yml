@@ -142,14 +142,17 @@ jobs:
         run: |
           set -euo pipefail
           OUT="contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst"
-          tar -I 'zstd -T0 -3' -cf "$OUT" \
+          # macOS tar is bsdtar: -I/--use-compress-program does not split its
+          # argument, so pipe through zstd instead of passing "zstd -T0 -3".
+          tar -cf - \
             -C "$GITHUB_WORKSPACE" \
               contrib/contrib-${{ env.ARCH }}-* \
               contrib/${{ env.ARCH }}-${{ env.SDK }} \
               contrib/tarballs \
             -C "$HOME" \
               .cargo/bin/cargo-capi .cargo/bin/cargo-cbuild \
-              .cargo/bin/cargo-cinstall .cargo/bin/cargo-ctest
+              .cargo/bin/cargo-cinstall .cargo/bin/cargo-ctest \
+            | zstd -T0 -3 -f -o "$OUT"
           shasum -a 256 "$OUT" | tee "$OUT.sha256"
           echo "OUT=$OUT" >> "$GITHUB_ENV"
 
