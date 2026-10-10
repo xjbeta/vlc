@@ -90,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           CKEY="$(git rev-parse HEAD:contrib | cut -c1-12)"
-          BKEY="$(shasum -a 256 eriri/build.conf | cut -c1-8)"
+          BKEY="$(shasum -a 256 eriri/contrib.conf | cut -c1-8)"
           TAG="contrib-${{ env.ARCH }}-${{ env.SDK }}-${CKEY}-${BKEY}"
           echo "tag=${TAG}"
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

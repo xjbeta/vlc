@@ -4,7 +4,7 @@
 # Actions cache, which proved unreliable).
 #
 # "Version" = hash of the contrib source tree (git rev-parse HEAD:contrib)
-# plus a hash of eriri/build.conf. When either changes the tag changes and a
+# plus a hash of eriri/contrib.conf. When either changes the tag changes and a
 # fresh build is published.
 #
 # Run this manually (Actions -> "Build VLC contribs" -> Run workflow) before
@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           CKEY="$(git rev-parse HEAD:contrib | cut -c1-12)"
-          BKEY="$(shasum -a 256 eriri/build.conf | cut -c1-8)"
+          BKEY="$(shasum -a 256 eriri/contrib.conf | cut -c1-8)"
           TAG="contrib-${{ env.ARCH }}-${{ env.SDK }}-${CKEY}-${BKEY}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version tag: ${TAG}"
