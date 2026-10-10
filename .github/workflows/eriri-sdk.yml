@@ -97,8 +97,9 @@ jobs:
 
       # --------------------------------------------------------------- caches
       # Contribs are NOT cached here; they are built once by the "Build VLC
-      # contribs" workflow and fetched as a release asset (see the fetch step
-      # above), with an inline build as fallback.
+      # contribs" workflow and consumed as a release asset through
+      # --with-prebuilt-contribs (see the resolve step above), with an inline
+      # build as fallback.
       # 1) extras/tools (autoconf, pkg-config, cmake, meson, ...). Small but slow.
       - name: Restore VLC build tools
         id: cache-tools
