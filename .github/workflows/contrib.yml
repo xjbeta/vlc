@@ -134,25 +134,22 @@ jobs:
             --arch=${{ env.ARCH }} \
             --sdk=${{ env.SDK }} \
             --enable-shared \
-            --config="$GITHUB_WORKSPACE/eriri/build.conf"
+            --config="$GITHUB_WORKSPACE/eriri/build.conf" \
+            --package-contribs
 
       - name: Package contribs
         if: steps.check.outputs.exists != '1'
         shell: zsh {0}
         run: |
           set -euo pipefail
-          OUT="contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst"
-          # macOS tar is bsdtar: -I/--use-compress-program does not split its
-          # argument, so pipe through zstd instead of passing "zstd -T0 -3".
-          tar -cf - \
-            -C "$GITHUB_WORKSPACE" \
-              contrib/contrib-${{ env.ARCH }}-* \
-              contrib/${{ env.ARCH }}-${{ env.SDK }} \
-              contrib/tarballs \
-            -C "$HOME" \
-              .cargo/bin/cargo-capi .cargo/bin/cargo-cbuild \
-              .cargo/bin/cargo-cinstall .cargo/bin/cargo-ctest \
-            | zstd -T0 -3 -f -o "$OUT"
+          # build.sh --package-contribs produced the native prebuilt package
+          # (contrib/vlc-contrib-<HOST>-<DATE>.tar.zst). It contains only the
+          # install prefix (man/doc/lua/... stripped), which is all VLC needs
+          # to link, so the artifact is far smaller than the whole contrib tree.
+          SRC="$(ls contrib/vlc-contrib-*.tar.zst | head -1)"
+          OUT="vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst"
+          mv "$SRC" "$OUT"
+          ls -la "$OUT"
           shasum -a 256 "$OUT" | tee "$OUT.sha256"
           echo "OUT=$OUT" >> "$GITHUB_ENV"
 
@@ -173,8 +170,8 @@ jobs:
         if: steps.check.outputs.exists != '1'
         uses: actions/upload-artifact@v4
         with:
-          name: contrib-${{ env.ARCH }}-${{ env.SDK }}
-          path: contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst*
+          name: vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}
+          path: vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst*
           if-no-files-found: error
 
       - name: Save VLC build tools

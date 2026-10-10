@@ -79,35 +79,21 @@ jobs:
             exit 1
           fi
 
-      # Reuse the contribs built once by the "Build VLC contribs" workflow and
-      # published as a release asset. If the asset is not there yet, the build
-      # below falls back to building contribs inline.
-      - name: Fetch prebuilt contribs
+      # VLC's own prebuilt-contribs mechanism (--with-prebuilt-contribs) fetches
+      # the package published by the "Build VLC contribs" workflow. If the asset
+      # does not exist yet the fetch fails and build.sh falls back to building
+      # the contribs inline.
+      - name: Resolve prebuilt contribs URL
         id: prebuilt
         shell: zsh {0}
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           CKEY="$(git rev-parse HEAD:contrib | cut -c1-12)"
           BKEY="$(shasum -a 256 eriri/contrib.conf | cut -c1-8)"
           TAG="contrib-${{ env.ARCH }}-${{ env.SDK }}-${CKEY}-${BKEY}"
-          echo "tag=${TAG}"
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "no release '$TAG' yet; contribs will be built inline"
-            echo "hit=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p '*.tar.zst' -D "$RUNNER_TEMP/contrib"
-          mkdir -p "$RUNNER_TEMP/cpkg"
-          zstd -dc "$RUNNER_TEMP/contrib/"*.tar.zst | tar -xf - -C "$RUNNER_TEMP/cpkg"
-          cp -a "$RUNNER_TEMP/cpkg/contrib/." contrib/
-          if [ -d "$RUNNER_TEMP/cpkg/.cargo/bin" ]; then
-            mkdir -p "$HOME/.cargo/bin"
-            cp -a "$RUNNER_TEMP/cpkg/.cargo/bin/." "$HOME/.cargo/bin/"
-          fi
-          echo "hit=1" >> "$GITHUB_OUTPUT"
-          echo "reused prebuilt contribs from $TAG"
+          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/${TAG}/vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "prebuilt contribs: ${URL}"
 
       # --------------------------------------------------------------- caches
       # Contribs are NOT cached here; they are built once by the "Build VLC
@@ -208,7 +194,9 @@ jobs:
             --arch=${{ env.ARCH }} \
             --sdk=${{ env.SDK }} \
             --enable-shared \
-            --config="$GITHUB_WORKSPACE/eriri/build.conf"
+            --config="$GITHUB_WORKSPACE/eriri/build.conf" \
+            --with-prebuilt-contribs \
+            VLC_PREBUILT_CONTRIBS_URL="${{ steps.prebuilt.outputs.url }}"
 
       - name: Show ccache stats
         if: always()
