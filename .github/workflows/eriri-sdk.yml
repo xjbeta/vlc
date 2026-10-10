@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -274,3 +275,28 @@ jobs:
         with:
           path: .ccache
           key: ${{ runner.os }}-ccache-${{ env.ARCH }}-${{ github.run_id }}
+
+      # GitHub only evicts caches by LRU once the repo passes 10 GB and
+      # expires them after 7 days, so rolling keys would accumulate. Keep
+      # only the newest cache of each type.
+      - name: Prune old caches (keep newest per type)
+        if: always()
+        shell: zsh {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for prefix in \
+            "macOS-vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}-" \
+            "macOS-vlc-build-${{ env.ARCH }}-" \
+            "macOS-ccache-${{ env.ARCH }}-" ; do
+            echo "== $prefix"
+            gh api "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+              --jq ".actions_caches[] | select(.key | startswith(\"$prefix\")) | \"\(.created_at)\t\(.id)\"" \
+              | sort -r | tail -n +2 | cut -f2 \
+              | while read -r id; do
+                  [ -n "$id" ] || continue
+                  gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null \
+                    && echo "  deleted $id"
+                done
+          done
