@@ -53,6 +53,28 @@ jobs:
           if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
           xcodebuild -version
 
+      # Some Eriri patches live in contrib/ (0009 fixes ffmpeg
+      # cross-compilation for macOS/arm64, 0013 switches librist to a git
+      # checkout), so the contribs must be built from the patched tree.
+      # Applying them here also makes HEAD:contrib — the first half of the
+      # version tag — match what the SDK workflow computes after its own
+      # git am, so it can actually find this release.
+      - name: Apply Eriri patches
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          setopt null_glob
+          patches=(patches/*.patch)
+          (( ${#patches} )) || { echo "no patches in patches/"; exit 1; }
+          git config user.email "eriri-ci@localhost"
+          git config user.name "Eriri CI"
+          echo "applying: ${patches[@]}"
+          if ! git am "${patches[@]}"; then
+            git am --abort || true
+            echo "Applying the patches failed, aborting git-am" >&2
+            exit 1
+          fi
+
       - name: Resolve contrib version
         id: v
         shell: zsh {0}

@@ -79,26 +79,39 @@ jobs:
             exit 1
           fi
 
-      # VLC's own prebuilt-contribs mechanism (--with-prebuilt-contribs) fetches
-      # the package published by the "Build VLC contribs" workflow. If the asset
-      # does not exist yet the fetch fails and build.sh falls back to building
-      # the contribs inline.
-      - name: Resolve prebuilt contribs URL
+      # Fetch the contribs built once by the "Build VLC contribs" workflow from
+      # its release asset with gh (authenticated, follows the asset redirect,
+      # and keeps working if the repo ever turns private) instead of a bare
+      # public URL. The local file is handed to build.sh's native
+      # prebuilt-contribs mechanism as a file:// URL. If the release does not
+      # exist yet, the build falls back to building the contribs inline.
+      - name: Fetch prebuilt contribs
         id: prebuilt
         shell: zsh {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           CKEY="$(git rev-parse HEAD:contrib | cut -c1-12)"
           BKEY="$(shasum -a 256 eriri/contrib.conf | cut -c1-8)"
           TAG="contrib-${{ env.ARCH }}-${{ env.SDK }}-${CKEY}-${BKEY}"
-          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/${TAG}/vlc-contrib-${{ env.ARCH }}-${{ env.SDK }}.tar.zst"
-          echo "url=${URL}" >> "$GITHUB_OUTPUT"
-          echo "prebuilt contribs: ${URL}"
+          D="$RUNNER_TEMP/prebuilt-contribs"
+          rm -rf "$D"; mkdir -p "$D"
+          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+               -p 'vlc-contrib-*.tar.zst' -D "$D"; then
+            F="$(ls "$D"/vlc-contrib-*.tar.zst | head -1)"
+            echo "url=file://$F" >> "$GITHUB_OUTPUT"
+            echo "hit=1" >> "$GITHUB_OUTPUT"
+            echo "prebuilt contribs: $TAG -> $F"
+          else
+            echo "hit=0" >> "$GITHUB_OUTPUT"
+            echo "no release '$TAG' yet; contribs will be built inline"
+          fi
 
       # --------------------------------------------------------------- caches
       # Contribs are NOT cached here; they are built once by the "Build VLC
       # contribs" workflow and consumed as a release asset through
-      # --with-prebuilt-contribs (see the resolve step above), with an inline
+      # --with-prebuilt-contribs (see the fetch step above), with an inline
       # build as fallback.
       # 1) extras/tools (autoconf, pkg-config, cmake, meson, ...). Small but slow.
       - name: Restore VLC build tools
@@ -191,13 +204,19 @@ jobs:
           set -euo pipefail
           mkdir -p build-dir
           cd build-dir
+          # Only ask build.sh for prebuilt contribs when the release asset was
+          # actually fetched; otherwise it builds them inline.
+          PREBUILT=()
+          if [ "${{ steps.prebuilt.outputs.hit }}" = "1" ]; then
+            PREBUILT=(--with-prebuilt-contribs
+                      "VLC_PREBUILT_CONTRIBS_URL=${{ steps.prebuilt.outputs.url }}")
+          fi
           ../extras/package/apple/build.sh \
             --arch=${{ env.ARCH }} \
             --sdk=${{ env.SDK }} \
             --enable-shared \
             --config="$GITHUB_WORKSPACE/eriri/build.conf" \
-            --with-prebuilt-contribs \
-            VLC_PREBUILT_CONTRIBS_URL="${{ steps.prebuilt.outputs.url }}"
+            "${PREBUILT[@]}"
 
       - name: Show ccache stats
         if: always()
