@@ -1,0 +1,28 @@
+From 0a1a6e4e97bbdecf5ebacf8c7d1e8db3dae21bc7 Mon Sep 17 00:00:00 2001
+From: xjbeta <xjbeta.tiny@gmail.com>
+Date: Mon, 12 Oct 2026 02:47:43 +0800
+Subject: [PATCH] medialibrary: log directory browse results (temporary
+ diagnostic)
+
+---
+ modules/misc/medialibrary/fs/directory.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/modules/misc/medialibrary/fs/directory.cpp b/modules/misc/medialibrary/fs/directory.cpp
+index 98cfa35802..85183b6594 100644
+--- a/modules/misc/medialibrary/fs/directory.cpp
++++ b/modules/misc/medialibrary/fs/directory.cpp
+@@ -185,6 +185,10 @@ SDDirectory::requestMetadataSync(input_item_t *media,
+     while (req.probe == false) {
+         req.cond.wait(req.lock);
+     }
++    /* ERI-DIAG: temporary, remove once the indexing gap is understood */
++    fprintf( stderr, "[ERI-DIAG] browse mrl=%s status=%d children=%zu\n",
++             m_mrl.c_str(), req.status,
++             out_children != nullptr ? out_children->size() : 0 );
+     if (req.status == VLC_ETIMEOUT) {
+             throw medialibrary::fs::errors::System(
+                 ETIMEDOUT, "Failed to browse directory: Operation timed out" );
+-- 
+2.56.0
+
