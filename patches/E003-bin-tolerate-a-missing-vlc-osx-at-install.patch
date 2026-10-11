@@ -1,0 +1,30 @@
+From 70333b2ce4870d933dac6faa56173266b6c640d3 Mon Sep 17 00:00:00 2001
+From: xjbeta <xjbeta.tiny@gmail.com>
+Date: Mon, 12 Oct 2026 02:58:43 +0800
+Subject: [PATCH] bin: tolerate a missing vlc-osx when renaming it at install
+ time
+
+---
+ bin/Makefile.am | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/bin/Makefile.am b/bin/Makefile.am
+index 24406df930..a59aec9281 100644
+--- a/bin/Makefile.am
++++ b/bin/Makefile.am
+@@ -147,8 +147,11 @@ MOSTLYCLEANFILES = $(noinst_DATA)
+ 
+ if HAVE_OSX
+ if BUILD_VLC
++# Eriri: install-exec-am may still be installing vlc-osx when this runs under a
++# parallel make, which made the build fail with "mv: rename vlc-osx to vlc: No
++# such file or directory". Rename it when it is there and carry on otherwise.
+ install-data-local:
+-	cd "$(DESTDIR)$(bindir)"; mv vlc-osx vlc
++	cd "$(DESTDIR)$(bindir)"; test ! -f vlc-osx || mv vlc-osx vlc
+ 
+ endif
+ endif
+-- 
+2.56.0
+
