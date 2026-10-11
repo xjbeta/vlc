@@ -1,0 +1,71 @@
+From 7542fefc8fd84e44b58de49c7e9770cdfdf24c0a Mon Sep 17 00:00:00 2001
+From: xjbeta <xjbeta.tiny@gmail.com>
+Date: Mon, 12 Oct 2026 03:51:50 +0800
+Subject: [PATCH] preparser: allow running it in-process instead of in a child
+ process
+
+---
+ configure.ac   | 10 +++++++++-
+ eriri/vlc.conf | 17 +++++++++++------
+ 2 files changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index e7e8209aa0..8c9154d596 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -596,8 +596,16 @@ AM_COND_IF([HAVE_PROCESS_SPAWN], [
+ dnl External (out-of-process) preparser requires both process spawn support
+ dnl and dynamic linking: in static builds libvlc.a and the preparser binary
+ dnl both define vlc_module_name, causing a multiple-definition link error.
++dnl
++dnl It can be turned off explicitly with --disable-external-preparser, which
++dnl makes the preparser run in-process instead. This is what Apple platforms
++dnl without process spawn already do.
++AC_ARG_ENABLE([external-preparser],
++  [AS_HELP_STRING([--disable-external-preparser],
++                  [run the preparser in-process instead of in a child process])])
+ AM_CONDITIONAL([HAVE_EXTERNAL_PREPARSER],
+-    [test "${HAVE_PROCESS_SPAWN}" = "1" -a "${enable_shared}" != "no"])
++    [test "${HAVE_PROCESS_SPAWN}" = "1" -a "${enable_shared}" != "no" \
++        -a "${enable_external_preparser}" != "no"])
+ AM_COND_IF([HAVE_EXTERNAL_PREPARSER], [
+   AC_DEFINE([HAVE_VLC_EXTERNAL_PREPARSER], [1],
+             [Define to 1 if the out-of-process preparser is supported.])
+diff --git a/eriri/vlc.conf b/eriri/vlc.conf
+index 150b1689e7..e450462eeb 100644
+--- a/eriri/vlc.conf
++++ b/eriri/vlc.conf
+@@ -13,12 +13,9 @@ export VLC_CONFIG_OPTIONS_BASE=(
+     --enable-lua
+     --disable-qt
+     --disable-skins2
+-    # Eriri: upstream's Apple base options disable this, but the medialibrary
+-    # browses directories through the out-of-process preparser, which lives in
+-    # libexec/vlc/vlc-preparser and is only built when BUILD_VLC is true
+-    # (bin/preparser/Makefile.am). VLC's own macOS SDK builds it, and without it
+-    # discovery fails with "Failed to browse directory" / "Fail to create
+-    # Process in process_pool".
++    # Eriri: kept for parity with VLC's own macOS SDK, which builds the vlc
++    # binary and libexec/vlc/vlc-preparser. Note the out-of-process preparser
++    # itself is disabled below.
+     --enable-vlc
+     --disable-vlm
+     --disable-nls
+@@ -48,6 +45,14 @@ export VLC_CONFIG_OPTIONS_BASE=(
+ # loudly if the contrib is missing, instead of silently shipping without it.
+ export VLC_CONFIG_OPTIONS_MACOSX=(
+     --enable-medialibrary
++    # Eriri: run the preparser in-process. The out-of-process one communicates
++    # with libexec/vlc/vlc-preparser over a pipe, and on macOS that layer is
++    # unreliable: folder discovery randomly hangs or times out, and metadata
++    # extraction fails with a bogus status (INT32_MIN) for most files, so only
++    # a fraction of the library ever gets indexed. The parse itself works -- it
++    # is the IPC around it that breaks -- and VLCKit on Apple platforms uses
++    # the in-process path for the same reason.
++    --disable-external-preparser
+ )
+ 
+ # Additional configure options for iOS
+-- 
+2.56.0
+
