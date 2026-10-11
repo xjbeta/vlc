@@ -218,6 +218,25 @@ jobs:
             --config="$GITHUB_WORKSPACE/eriri/build.conf" \
             "${PREBUILT[@]}"
 
+      # VLC's own build only generates modules/plugins.dat when build == host,
+      # and that never holds here: the build triple carries the OS version
+      # (aarch64-apple-darwin25.6.0 vs aarch64-apple-darwin), so it prints
+      # "Cross-compilation: cache generation skipped!" and ships no cache.
+      #
+      # Without it every VLC process -- the app and each vlc-preparser helper --
+      # dlopens all ~380 plugins at startup, which takes over five seconds. The
+      # medialibrary's metadata preparser has a 5s timeout, so its helpers get
+      # killed before they finish starting and folder discovery stalls.
+      - name: Generate the plugin cache
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SDK="build-dir/vlc-macosx-arm64"
+          DYLD_LIBRARY_PATH="$SDK/lib" \
+          VLC_PLUGIN_PATH="$SDK/lib/vlc/plugins" \
+            "$SDK/libexec/vlc/vlc-cache-gen" "$SDK/lib/vlc/plugins"
+          ls -la "$SDK/lib/vlc/plugins/plugins.dat"
+
       - name: Show ccache stats
         if: always()
         shell: zsh {0}

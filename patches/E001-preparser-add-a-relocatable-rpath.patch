@@ -1,0 +1,28 @@
+From e97e69963a3fd9b091e3c90d7371ed7459b77961 Mon Sep 17 00:00:00 2001
+From: xjbeta <xjbeta.tiny@gmail.com>
+Date: Mon, 12 Oct 2026 02:24:04 +0800
+Subject: [PATCH] bin/preparser: add a relative rpath so a relocated SDK still
+ works
+
+---
+ bin/preparser/Makefile.am | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/bin/preparser/Makefile.am b/bin/preparser/Makefile.am
+index 769a8c26ff..d2fcbbc515 100644
+--- a/bin/preparser/Makefile.am
++++ b/bin/preparser/Makefile.am
+@@ -35,6 +35,10 @@ vlc_preparser_DEPENDENCIES = \
+ if HAVE_OSX
+ vlc_preparser_LDFLAGS += -Wl,-framework,CoreFoundation,-framework,Cocoa
+ vlc_preparser_LDFLAGS += -Xlinker -rpath -Xlinker "$(libdir)"
++dnl Eriri: the absolute rpath above is baked in at build time, so a relocated
++dnl SDK leaves vlc-preparser unable to find libvlc.dylib. The helper lives in
++dnl <prefix>/libexec/vlc, hence two levels up.
++vlc_preparser_LDFLAGS += -Xlinker -rpath -Xlinker "@loader_path/../../lib"
+ if HAVE_BREAKPAD
+ vlc_preparser_LDFLAGS += -Wl,-framework,Breakpad
+ vlc_preparser_OBJCFLAGS = -F$(CONTRIB_DIR)/Frameworks
+-- 
+2.56.0
+
