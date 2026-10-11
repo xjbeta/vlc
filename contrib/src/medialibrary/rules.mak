@@ -18,6 +18,10 @@ $(TARBALLS)/medialibrary-$(MEDIALIBRARY_VERSION).tar.bz2:
 medialibrary: medialibrary-$(MEDIALIBRARY_VERSION).tar.bz2 .sum-medialibrary
 	$(UNPACK)
 	$(MOVE)
+	# Eriri: give sqlite a busy timeout, and keep a sqlite error from escaping a
+	# parser thread (which calls std::terminate). Both are needed for the media
+	# library to survive concurrent database access.
+	$(APPLY) $(SRC)/medialibrary/0001-wait-for-sqlite-locks-instead-of-failing-at-once.patch
 
 .medialibrary: medialibrary crossfile.meson
 	$(MESONCLEAN)

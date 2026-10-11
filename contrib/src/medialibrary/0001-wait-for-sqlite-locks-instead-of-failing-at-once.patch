@@ -1,0 +1,40 @@
+--- a/src/database/SqliteConnection.cpp
++++ b/src/database/SqliteConnection.cpp
+@@ -133,6 +133,18 @@
+         return 0;
+     }, nullptr );
+ #endif
++    /*
++     * Eriri: wait for a lock instead of failing immediately.
++     *
++     * The library keeps one connection per thread (the discoverer, each parser
++     * worker, ...) and its transactions use BEGIN EXCLUSIVE, so a write from
++     * one thread collides with a read or a write from another. Without a busy
++     * timeout SQLite reports SQLITE_BUSY at once, which makes the discovery
++     * abort half way through -- while still reporting completion -- and makes
++     * an escaping sqlite exception terminate the whole process.
++     */
++    sqlite3_busy_timeout( dbConnection, 5000 );
++
+     m_conns.emplace( compat::this_thread::get_id(), std::move( dbConn ) );
+     sqlite3_update_hook( dbConnection, &updateHook, this );
+     sqlite3_create_collation_v2( dbConnection, "FILENAME", SQLITE_UTF8, this,
+--- a/src/parser/ParserWorker.cpp
++++ b/src/parser/ParserWorker.cpp
+@@ -251,6 +251,16 @@
+             catch ( const fs::errors::Exception& ex )
+             {
+                 LOG_ERROR( "Caught an FS exception during ", task->mrl(), " [", serviceName, "] parsing: ", ex.what() );
++                status = Status::Fatal;
++            }
++            catch ( const std::exception& ex )
++            {
++                /*
++                 * Eriri: anything else (a sqlite error, for instance) would
++                 * escape this thread and call std::terminate, killing the
++                 * application. Treat it as a failed parse instead.
++                 */
++                LOG_ERROR( "Caught an exception during ", task->mrl(), " [", serviceName, "] parsing: ", ex.what() );
+                 status = Status::Fatal;
+             }
+             if ( handleServiceResult( *task, status ) == false )
