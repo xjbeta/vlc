@@ -237,6 +237,16 @@ jobs:
             "$SDK/libexec/vlc/vlc-cache-gen" "$SDK/lib/vlc/plugins"
           ls -la "$SDK/lib/vlc/plugins/plugins.dat"
 
+      # The backup is what vlc_cache_load() falls back on when plugins.dat
+      # cannot be read, so a copy or a clean-up that dropped the cache costs a
+      # few reads instead of the ~100 s dlopen storm.
+      # eriri/make-plugin-cache-backup.sh has the details.
+      - name: Back up the plugin cache
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          ./eriri/make-plugin-cache-backup.sh "build-dir/${{ env.SDK_DIR }}"
+
       - name: Show ccache stats
         if: always()
         shell: zsh {0}

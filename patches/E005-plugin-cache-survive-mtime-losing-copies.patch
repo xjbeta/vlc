@@ -1,0 +1,263 @@
+From 1a2bece08468a9baabedea18ca58af272595344c Mon Sep 17 00:00:00 2001
+From: ci <ci@localhost>
+Date: Thu, 15 Oct 2026 01:13:44 +0800
+Subject: [PATCH] eriri-sdk: key the plugin cache on content, not on mtimes
+ (E005)
+
+The cache was keyed on each plugin file's size and modification time, so a copy
+that does not preserve timestamps -- cp -R, Finder, Keka -- invalidated all 377
+entries, and libvlc answered by dlopening every plugin at startup: 153 s on this
+external volume, spent in the kernel validating each freshly created dylib's
+code signature (97% of the samples sit in mapSegments(..., CodeSignatureInFile)
+-> fcntl). Rebuilding the cache costs the same dlopens, so the only cheap answer
+is to not lose it.
+
+E005 now keys each cache entry on the contents alone: the entry carries a
+fingerprint of the file and the scan compares it, so no timestamp can invalidate
+anything and every copy method -- cp -R, Finder, tar, rsync, restoring a backup
+-- behaves the same. The size is still compared first, because the scan has it
+for free and it is part of the fingerprint anyway: a file that changed size is
+stale without being read.
+
+The fingerprint samples the head and the tail (4 KB each) and mixes in the file
+size. Those are the two places where a rebuild or a re-sign shows up -- the
+Mach-O header carries the UUID, the segment sizes and the dependency list, the
+tail carries the code signature -- so checking all 377 plugins costs a few
+hundred reads instead of reading 130 MB.
+
+vlc_cache_load() also falls back on plugins.dat.bak when plugins.dat cannot be
+read, and a scan that had to rely on the cache being absent or incomplete writes
+the cache back, so losing it costs one rescan rather than one per start. The
+cache sub-version is bumped to 39, so an existing cache is rebuilt once.
+---
+ src/modules/bank.c    | 97 ++++++++++++++++++++++++++++++++++++++++---
+ src/modules/cache.c   | 20 +++++++--
+ src/modules/modules.h |  2 +-
+ 3 files changed, 110 insertions(+), 9 deletions(-)
+
+diff --git a/src/modules/bank.c b/src/modules/bank.c
+index db92029cfc..57d458c991 100644
+--- a/src/modules/bank.c
++++ b/src/modules/bank.c
+@@ -36,6 +36,7 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
++#include <fcntl.h>
+ #ifdef HAVE_SEARCH_H
+ # include <search.h>
+ #endif
+@@ -302,11 +303,80 @@ typedef struct module_bank
+     const char   *base;
+     cache_mode_t  mode;
+ 
++    /** A cache entry was missing or out of date, so the cache on disk no
++     *  longer describes the plug-ins and is worth saving after the scan. */
++    bool          outdated;
++
+     size_t        size;
+     vlc_plugin_t **plugins;
+     vlc_plugin_t *cache;
+ } module_bank_t;
+ 
++/**
++ * Computes a fingerprint of a plug-in file's contents.
++ *
++ * The cache is keyed on the contents, not on the file's timestamps: a copy that
++ * does not preserve them -- cp -R, a Finder copy, a tar extraction, restoring a
++ * backup -- must not invalidate anything. Treating those entries as stale costs
++ * one dlopen per plug-in, and dlopening a freshly created file is expensive:
++ * the kernel has to validate its embedded code signature first.
++ *
++ * Reading every byte would cost 130 MB per start on a slow volume, so this
++ * samples the two places where a rebuild or a re-sign shows up: the head
++ * carries the Mach-O header, the UUID, the segment sizes and the dependency
++ * list, the tail the code signature. The size is mixed in as well, so a file
++ * that grew or shrank differs even if its samples do not.
++ *
++ * \return the fingerprint, or 0 if the file cannot be read. 0 is never stored
++ *         as a valid one, so such an entry is always treated as stale.
++ */
++#define PLUGIN_FINGERPRINT_SAMPLE 4096
++
++static uint64_t PluginFingerprint(const char *abspath)
++{
++    int fd = vlc_open(abspath, O_RDONLY);
++    if (fd == -1)
++        return 0;
++
++    off_t size = lseek(fd, 0, SEEK_END);
++    if (size < 0)
++    {
++        vlc_close(fd);
++        return 0;
++    }
++
++    uint64_t hash = UINT64_C(14695981039346656037); /* FNV-1a offset basis */
++    hash = (hash ^ (uint64_t)size) * UINT64_C(1099511628211);
++
++    /* Head and tail; a file shorter than a sample is read in one go. */
++    off_t offsets[2];
++    int samples = 0;
++
++    offsets[samples++] = 0;
++    if (size > PLUGIN_FINGERPRINT_SAMPLE)
++        offsets[samples++] = size - PLUGIN_FINGERPRINT_SAMPLE;
++
++    char buf[PLUGIN_FINGERPRINT_SAMPLE];
++
++    for (int i = 0; i < samples; i++)
++    {
++        if (lseek(fd, offsets[i], SEEK_SET) == (off_t)-1)
++            break;
++
++        ssize_t len = read(fd, buf, sizeof (buf));
++        if (len <= 0)
++            break;
++
++        for (ssize_t j = 0; j < len; j++)
++        {
++            hash ^= (uint8_t)buf[j];
++            hash *= UINT64_C(1099511628211); /* FNV-1a prime */
++        }
++    }
++    vlc_close(fd);
++    return hash;
++}
++
+ /**
+  * Scans a plug-in from a file.
+  */
+@@ -321,14 +391,23 @@ static int AllocatePluginFile (module_bank_t *bank, const char *abspath,
+         plugin = vlc_cache_lookup(&bank->cache, relpath);
+ 
+         if (plugin != NULL
+-         && (plugin->mtime != (int64_t)st->st_mtime
+-          || plugin->size != (uint64_t)st->st_size))
++         && (plugin->size != (uint64_t)st->st_size
++          || plugin->fingerprint == 0
++          || plugin->fingerprint != PluginFingerprint(abspath)))
+         {
++            /* The cache is keyed on the contents, so the file's timestamps do
++             * not matter and a copy that dropped them changes nothing. The size
++             * is compared first because the scan has it for free and it is part
++             * of the fingerprint anyway: a file that changed size is stale
++             * without being read. */
+             msg_Err(bank->obj, "stale plugins cache: modified %s",
+                     plugin->abspath);
+             vlc_plugin_destroy(plugin);
+             plugin = NULL;
+         }
++
++        if (plugin == NULL)
++            bank->outdated = true; /* not in the cache, or the entry was stale */
+     }
+ 
+     if (plugin == NULL)
+@@ -342,8 +421,8 @@ static int AllocatePluginFile (module_bank_t *bank, const char *abspath,
+         if (plugin != NULL)
+         {
+             plugin->path = path;
+-            plugin->mtime = st->st_mtime;
+             plugin->size = st->st_size;
++            plugin->fingerprint = PluginFingerprint(abspath);
+         }
+         else free(path);
+     }
+@@ -353,7 +432,11 @@ static int AllocatePluginFile (module_bank_t *bank, const char *abspath,
+ 
+     vlc_plugin_store(plugin);
+ 
+-    if (bank->mode & CACHE_WRITE_FILE) /* Add entry to to-be-saved cache */
++    /* Add the entry to the to-be-saved cache. When a cache is being read we do
++     * not know yet whether it will have to be written back -- that depends on
++     * what the rest of the scan finds -- so collect the entries either way and
++     * let AllocatePluginPath() decide. */
++    if (bank->mode & (CACHE_WRITE_FILE | CACHE_READ_FILE))
+     {
+         bank->plugins = xrealloc(bank->plugins,
+                                  (bank->size + 1) * sizeof (vlc_plugin_t *));
+@@ -547,7 +630,11 @@ static void AllocatePluginPath(libvlc_int_t *obj, const char *path,
+             vlc_plugin_store(plugin);
+     }
+ 
+-    if (mode & CACHE_WRITE_FILE)
++    /* A scan that had to read the plug-ins to make sense of them -- because
++     * the cache was missing or incomplete -- should not have to do it again:
++     * save what it found. CacheSave writes atomically and skips silently when
++     * the directory is not writable. */
++    if ((mode & CACHE_WRITE_FILE) || bank.outdated)
+         CacheSave(obj, path, bank.plugins, bank.size);
+ 
+     free(bank.plugins);
+diff --git a/src/modules/cache.c b/src/modules/cache.c
+index 6e8b7aec50..5faf2ccd07 100644
+--- a/src/modules/cache.c
++++ b/src/modules/cache.c
+@@ -57,7 +57,7 @@
+ #ifdef HAVE_DYNAMIC_PLUGINS
+ /* Sub-version number
+  * (only used to avoid breakage in dev version when cache structure changes) */
+-#define CACHE_SUBVERSION_NUM 36
++#define CACHE_SUBVERSION_NUM 39
+ 
+ /* Cache filename */
+ #define CACHE_NAME "plugins.dat"
+@@ -352,8 +352,8 @@ static vlc_plugin_t *vlc_cache_load_plugin(block_t *file)
+         goto error;
+ 
+     LOAD_FLAG(plugin->unloadable);
+-    LOAD_IMMEDIATE(plugin->mtime);
+     LOAD_IMMEDIATE(plugin->size);
++    LOAD_IMMEDIATE(plugin->fingerprint);
+ 
+     if (plugin->textdomain != NULL)
+         vlc_bindtextdomain(plugin->textdomain);
+@@ -386,6 +386,20 @@ vlc_plugin_t *vlc_cache_load(libvlc_int_t *p_this, const char *dir,
+     msg_Dbg( p_this, "loading plugins cache file %s", psz_filename );
+ 
+     block_t *file = block_FilePath(psz_filename, false);
++    if (file == NULL)
++    {
++        /* The cache is a build artifact shipped next to the plug-ins; a copy or
++         * a clean-up that dropped it would otherwise cost a full rescan, so
++         * fall back on the backup the SDK keeps beside it. */
++        char *psz_backup;
++
++        if (asprintf(&psz_backup, "%s"DIR_SEP CACHE_NAME ".bak", dir) != -1)
++        {
++            msg_Dbg(p_this, "loading plugins cache backup %s", psz_backup);
++            file = block_FilePath(psz_backup, false);
++            free(psz_backup);
++        }
++    }
+     if (file == NULL)
+         msg_Warn(p_this, "cannot read %s: %s", psz_filename,
+                  vlc_strerror_c(errno));
+@@ -642,8 +656,8 @@ static int CacheSaveBank(FILE *file, vlc_plugin_t *const *cache, size_t n)
+         SAVE_STRING(plugin->textdomain);
+         SAVE_STRING(plugin->path);
+         SAVE_FLAG(plugin->unloadable);
+-        SAVE_IMMEDIATE(plugin->mtime);
+         SAVE_IMMEDIATE(plugin->size);
++        SAVE_IMMEDIATE(plugin->fingerprint);
+     }
+ 
+     if (fflush (file)) /* flush libc buffers */
+diff --git a/src/modules/modules.h b/src/modules/modules.h
+index 463aa7cc26..cc58aff73c 100644
+--- a/src/modules/modules.h
++++ b/src/modules/modules.h
+@@ -54,8 +54,8 @@ typedef struct vlc_plugin_t
+     char *abspath; /**< Absolute path */
+ 
+     char *path; /**< Relative path (within plug-in directory) */
+-    int64_t mtime; /**< Last modification time */
+     uint64_t size; /**< File size */
++    uint64_t fingerprint; /**< Fingerprint of the contents (0: unknown) */
+ #endif
+ } vlc_plugin_t;
+ 
+-- 
+2.56.0
+
