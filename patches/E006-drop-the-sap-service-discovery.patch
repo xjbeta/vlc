@@ -1,0 +1,51 @@
+From 0ddb54ab532faab391ecb2ec9e6d5c6b4a1012e6 Mon Sep 17 00:00:00 2001
+From: ci <ci@localhost>
+Date: Thu, 15 Oct 2026 03:28:08 +0800
+Subject: [PATCH] eriri-sdk: drop the SAP service discovery (E006)
+
+Every launch logs ten multicast errors, from net_Subscribe() in
+src/network/udp.c:
+
+    cannot join multicast group: Invalid argument
+    cannot join multicast group: Can't assign requested address
+
+They come from the sap service discovery: modules/services_discovery/sap.c
+joins four IPv4 groups plus their IPv6 counterparts when it opens, and the
+medialibrary pulls the available discoveries up when it enumerates network
+devices at startup. The joins fail on this machine, whose only IPv4 address is
+on en1 while two dozen other interfaces (utun*, awdl0, nan0, ap1, bridge0)
+exist: the IPv6 join carries no interface index (EINVAL), the IPv4 one has no
+address to use (EADDRNOTAVAIL). Nothing is broken by it, but ten error lines per
+launch are noise, and nothing in Eriri listens to SAP announcements: it is a
+local player, SAP is streams announced on the LAN.
+
+Unlike dsm there is no --disable-sap, so the patch drops the plugin from the
+build instead. Nothing else compiles access/rtp/sdp.c out of existence: the rtp
+access and its tests keep it.
+
+Verified by bisection, one app launch each: every service-discovery plugin
+present -> 10 errors; all of them disabled -> 0; sap alone restored -> 10 again;
+upnp alone disabled -> still 10, so it is not the one failing.
+---
+ modules/services_discovery/Makefile.am | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/modules/services_discovery/Makefile.am b/modules/services_discovery/Makefile.am
+index 28c2ce4ad7..297c361395 100644
+--- a/modules/services_discovery/Makefile.am
++++ b/modules/services_discovery/Makefile.am
+@@ -15,11 +15,6 @@ sd_PLUGINS += libpodcast_plugin.la
+ libradio_plugin_la_SOURCES = services_discovery/radio.c
+ sd_PLUGINS += libradio_plugin.la
+ 
+-libsap_plugin_la_SOURCES = services_discovery/sap.c access/rtp/sdp.c
+-libsap_plugin_la_CPPFLAGS = $(AM_CPPFLAGS)
+-libsap_plugin_la_LIBADD = $(SOCKET_LIBS) $(LIBZ)
+-sd_PLUGINS += libsap_plugin.la
+-
+ libavahi_plugin_la_SOURCES = services_discovery/avahi.c
+ libavahi_plugin_la_CFLAGS = $(AM_CFLAGS) $(AVAHI_CFLAGS)
+ libavahi_plugin_la_LDFLAGS = $(AM_LDFLAGS) $(sd_RPATH)
+-- 
+2.56.0
+
