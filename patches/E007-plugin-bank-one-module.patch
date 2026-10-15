@@ -1,0 +1,411 @@
+From 0fffdc7b6625135d487bcda28b6c2dae1533ece6 Mon Sep 17 00:00:00 2001
+From: Eriri CI <eriri-ci@localhost>
+Date: Thu, 15 Oct 2026 05:46:24 +0800
+Subject: [PATCH] eriri-sdk: build a single module holding every plugin (E007)
+
+Mapping a plugin dylib for the first time is what the kernel spends its
+embedded code signature validation on, and that cost is per file rather than
+per byte: 0.14-0.58 s for each newly created plugin file, 2-3 ms once it is
+warm. A playback closure is 50-80 plugins, so the first playback after an SDK
+swap takes tens of seconds, and it happens again whenever the system purges its
+validation cache. The file count is the only lever that moves it.
+
+This builds one libvlc_plugins.dylib out of the same partially-linked objects a
+fully static build uses, and has libvlccore register its modules directly
+instead of mapping one file per plugin. The plugins are still built, installed
+and scanned exactly as before, so the change is additive: without the bank, or
+if it cannot be loaded, everything behaves as it does today.
+
+In a dynamic build each plugin exports the unsuffixed vlc_entry, so the
+partially-linked object has no vlc_entry__<module> symbol for the static module
+table to refer to. Alias it to a name derived from the plugin path, and make
+the symbollist and the manifest agree on that name.
+
+  configure.ac        --enable-plugin-bank, and HAVE_STATIC_PLUGINS so that
+                      bin/vlc keeps linking the static module table only in a
+                      static build
+  bin/Makefile.am     gate that on HAVE_STATIC_PLUGINS
+  modules/static.mk   alias the entry, build and install the bank
+  src/modules/bank.c  load the bank when it is there, skip the plugin scan
+  eriri/vlc.conf      turn the bank on for the macOS SDK
+---
+ .vscode/c_cpp_properties.json |  16 +++++
+ bin/Makefile.am               |   2 +-
+ configure.ac                  |  25 ++++++++
+ eriri/vlc.conf                |   7 +++
+ modules/static.mk             |  95 ++++++++++++++++++++++++++++-
+ src/modules/bank.c            | 111 +++++++++++++++++++++++++++++++---
+ 6 files changed, 244 insertions(+), 12 deletions(-)
+ create mode 100644 .vscode/c_cpp_properties.json
+
+diff --git a/.vscode/c_cpp_properties.json b/.vscode/c_cpp_properties.json
+new file mode 100644
+index 0000000000..100f60972b
+--- /dev/null
++++ b/.vscode/c_cpp_properties.json
+@@ -0,0 +1,16 @@
++{
++    "configurations": [
++        {
++            "name": "Mac",
++            "includePath": [
++                "${workspaceFolder}/**"
++            ],
++            "defines": [],
++            "compilerPath": "/usr/bin/clang",
++            "cStandard": "c17",
++            "cppStandard": "c++14",
++            "intelliSenseMode": "macos-clang-arm64"
++        }
++    ],
++    "version": 4
++}
+\ No newline at end of file
+diff --git a/bin/Makefile.am b/bin/Makefile.am
+index a59aec9281..0c017ce6a4 100644
+--- a/bin/Makefile.am
++++ b/bin/Makefile.am
+@@ -127,7 +127,7 @@ vlc_cache_gen_LDFLAGS = -Wc,-static
+ EXTRA_vlc_cache_gen_DEPENDENCIES = vlc_win32_rc.$(OBJEXT)
+ endif
+ 
+-if HAVE_PARTIAL_LINKING
++if HAVE_STATIC_PLUGINS
+ AM_CPPFLAGS += -DVLC_PARTIAL_LINKING -I $(builddir)/../modules/
+ if !HAVE_WIN32
+ vlc_SOURCES += vlc_static_modules.c
+diff --git a/configure.ac b/configure.ac
+index 8c9154d596..279cd5b358 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1095,12 +1095,37 @@ AS_IF([test "${enable_partial_linking}" = "yes" -a "${have_partial_linking_suppo
+     AC_MSG_ERROR([Partial linking is not supported on this platform.])
+ ])
+ 
++dnl Eriri: a plugin bank is a single module holding every plugin, linked from
++dnl the same partially-linked objects a fully static build uses. It exists so
++dnl that loading a playback closure costs one file instead of one per plugin:
++dnl the first map of each new file is what the kernel spends its code signature
++dnl validation on, and that cost is per file, not per byte.
++AC_ARG_ENABLE([plugin-bank],
++  AS_HELP_STRING([--enable-plugin-bank],
++    [build a single module holding every plugin (default disabled)]))
++
++AS_IF([test "${enable_plugin_bank}" = "yes" -a "${have_partial_linking_support}" != "yes"], [
++    AC_MSG_ERROR([The plugin bank requires partial linking support.])
++])
++
+ have_partial_linking=no
+ AS_IF([test "${enable_partial_linking}" = "yes" -a "${have_dynamic_objects}" = "no"], [
+     have_partial_linking=yes
+ ])
++dnl The bank needs the partially-linked objects, but not a static build: the
++dnl plugins are still built and installed as usual, and the bank is an addition.
++AS_IF([test "${enable_plugin_bank}" = "yes"], [
++    have_partial_linking=yes
++])
+ 
+ AM_CONDITIONAL([HAVE_PARTIAL_LINKING], [test "${have_partial_linking}" = "yes"])
++AM_CONDITIONAL([HAVE_STATIC_PLUGINS], [test "${have_partial_linking}" = "yes" -a "${have_dynamic_objects}" = "no"])
++dnl The bank only makes sense where there are dynamic plugins to collapse; in a
++dnl static build everything is already in one library, so the option is a no-op.
++AM_CONDITIONAL([HAVE_PLUGIN_BANK], [test "${enable_plugin_bank}" = "yes" -a "${have_dynamic_objects}" = "yes"])
++AS_IF([test "${enable_plugin_bank}" = "yes" -a "${have_dynamic_objects}" = "yes"], [
++    AC_DEFINE([HAVE_PLUGIN_BANK], 1, [Define if the plugin bank is built])
++])
+ AS_IF([test "${have_partial_linking}" = "yes"], [
+     AC_DEFINE([HAVE_PARTIAL_LINKING], 1, [Define if static plugins use partial linking])
+ ])
+diff --git a/eriri/vlc.conf b/eriri/vlc.conf
+index 0e703ec58d..c076af15d5 100644
+--- a/eriri/vlc.conf
++++ b/eriri/vlc.conf
+@@ -63,6 +63,13 @@ export VLC_CONFIG_OPTIONS_MACOSX=(
+     # is the IPC around it that breaks -- and VLCKit on Apple platforms uses
+     # the in-process path for the same reason.
+     --disable-external-preparser
++    # Eriri: build one libvlc_plugins.dylib holding every plugin, so that
++    # libvlccore maps a single file instead of one file per plugin. The first
++    # map of each new file is where the kernel spends its code signature
++    # validation (~0.6 s/file cold, 2-3 ms warm), and a playback closure is
++    # 50-80 plugins, which is what makes the first playback after an SDK swap
++    # take tens of seconds. See docs/performance/dylib-first-load.md.
++    --enable-plugin-bank
+ )
+ 
+ # Additional configure options for iOS
+diff --git a/modules/static.mk b/modules/static.mk
+index f188691383..42f0142b34 100644
+--- a/modules/static.mk
++++ b/modules/static.mk
+@@ -11,8 +11,36 @@ PARTIAL_PLUGINS = $(PLUGINS:_plugin.la=_plugin.partial.la)
+ # final link otherwise.
+ PARTIAL_LINK_EXPORT_FLAGS =
+ if HAVE_DARWIN
++if HAVE_PLUGIN_BANK
++# The bank keeps one vlc_entry__<module> per plugin and demotes the unsuffixed
++# vlc_entry that each plugin exports for the dynamic loader, so that merging
++# every partial object into one module cannot collide on it.
++PARTIAL_LINK_EXPORT_FLAGS += -Wl,-exported_symbol,_vlc_entry__*
++else
+ PARTIAL_LINK_EXPORT_FLAGS += -Wl,-exported_symbol,_vlc_entry*
+ endif
++endif
++
++# Eriri: in a dynamic build a plugin exports the unsuffixed vlc_entry, so the
++# partially-linked object has no vlc_entry__<module> symbol for the static
++# module table to refer to. Alias the former to a name derived from the plugin
++# path; the symbollist and the manifest are made to agree on that name below.
++PARTIAL_LINK_ENTRY_ALIAS =
++if HAVE_PLUGIN_BANK
++PARTIAL_LINK_ENTRY_ALIAS += -Wl,-alias,_vlc_entry,$${entryalias}
++endif
++if HAVE_DARWIN
++PARTIAL_LINK_PLAIN_ENTRY = _vlc_entry
++else
++PARTIAL_LINK_PLAIN_ENTRY = vlc_entry
++endif
++
++# ld64 refuses -dead_strip together with -r, and configure puts -dead_strip in
++# LDFLAGS on Mach-O. Dropping it below loses nothing: this is not the final
++# link, and the bank that consumes these objects is dead-stripped when it is.
++# (The comma is a variable because make splits function arguments on commas.)
++vlc_partial_link_comma := ,
++PARTIAL_LINK_DROP_FLAGS = -Wl$(vlc_partial_link_comma)-dead_strip -dead_strip
+ 
+ .PRECIOUS: $(PARTIAL_PLUGINS) $(PLUGINS:.la=.la.symbollist) $(PARTIAL_PLUGINS:=.symbollist) \
+ 	$(PARTIAL_PLUGINS:%.partial.la=.deps/%.partial.la.o)
+@@ -31,13 +59,16 @@ endif
+ 	$(AM_V_at)$(MKDIR_P) $(@D)
+ 	$(AM_V_at)$(AM_V_P) && set -x; \
+ 	libpath=`grep old_library= "$<" | cut -d"'" -f 2`; \
++	entryalias=_vlc_entry__$$(echo "$(notdir $*)" | sed 's|_plugin$$||'); \
+ 	vlc_entrypoint=`$(NM) ".libs/$${libpath}" | \
+ 		awk '$$2 == "T" && $$3 ~ /^_?vlc_entry__[A-Za-z0-9_]+$$/ { print $$3; exit }'`; \
++	[ -n "$${vlc_entrypoint}" ] || vlc_entrypoint=$(PARTIAL_LINK_PLAIN_ENTRY); \
+ 	static_dependencies=`$(top_srcdir)/buildsystem/dependencies.sh static $<`; \
+-	$(CXX) $(CXXFLAGS) $(LDFLAGS) \
++	$(CXX) $(CXXFLAGS) $(filter-out $(PARTIAL_LINK_DROP_FLAGS),$(LDFLAGS)) \
+ 		-r -o $@ -fPIC \
+ 		$(FORCE_GROUP_ALLOCATION_LDFLAGS) \
+ 		$(PARTIAL_LINK_EXPORT_FLAGS) \
++		$(PARTIAL_LINK_ENTRY_ALIAS) \
+ 		-Wl,-u,$${vlc_entrypoint} \
+ 		".libs/$${libpath}" \
+ 		$${static_dependencies}
+@@ -81,6 +112,7 @@ if HAVE_PARTIAL_LINKING
+ 	$(AM_V_GEN)libpath=`grep old_library= "$<" | cut -d"'" -f 2`; \
+ 	entrypoint=`$(NM) ".libs/$${libpath}" | \
+ 	    awk '$$2 == "T" && $$3 ~ /^_?vlc_entry__[A-Za-z0-9_]+$$/ { s=$$3; sub(/^_/,"",s); print s; exit }'`; \
++	[ -n "$${entrypoint}" ] || entrypoint=_vlc_entry__$$(echo "$(notdir $*)" | sed 's|_plugin$$||'); \
+ 	echo $${entrypoint} > $@
+ 
+ # Symbollist from partial-linked .partial.la file (needed by manifest)
+@@ -137,6 +169,65 @@ libvlc_static_modules_la_LIBADD = $(PARTIAL_PLUGINS)
+ libvlc_static_modules_la_DEPENDENCIES = $(PARTIAL_PLUGINS)
+ EXTRA_libvlc_static_modules_la_DEPENDENCIES = vlc_modules_manifest.h
+ 
+-if HAVE_PARTIAL_LINKING
++if HAVE_STATIC_PLUGINS
+ pkglib_LTLIBRARIES += libvlc_static_modules.la
++else
++if HAVE_PLUGIN_BANK
++# Only an input to the bank below: installing it would ship every plugin's
++# objects a second time.
++noinst_LTLIBRARIES += libvlc_static_modules.la
++endif
++endif
++
++# Eriri: the plugin bank -- one module holding every plugin, so that loading a
++# playback closure maps one file instead of one file per plugin. It is
++# installed next to the other VLC libraries (not in the plugins directory, so
++# that the plugin cache keeps working as a fallback), and libvlccore registers
++# its modules directly, without a dlopen per plugin. vlc_static_modules[] is
++# the table of entry points, built from the manifest above.
++#
++# AM_LDFLAGS already exports ^vlc_entry (the 377 aliases); the table itself has
++# to be added on top of that list, which is what -exported_symbol does.
++# Eriri: one module holding every plugin makes the compact-unwind table bigger
++# than ld64 can encode ("Too many personality routines"), because each plugin's
++# C++ code brings its own personality routine. Falling back to the DWARF unwind
++# tables is the usual way around it.
++BANK_COMPACT_UNWIND_FLAGS =
++if HAVE_DARWIN
++BANK_COMPACT_UNWIND_FLAGS += -Wl,-no_compact_unwind
++endif
++
++BANK_EXPORT_FLAGS =
++if HAVE_DARWIN
++BANK_EXPORT_FLAGS += -Wl,-exported_symbol,_vlc_static_modules
++endif
++
++if HAVE_PLUGIN_BANK
++pkglib_LTLIBRARIES += libvlc_plugins.la
++
++libvlc_plugins_la_SOURCES = $(top_srcdir)/bin/vlc_static_modules.c
++libvlc_plugins_la_CPPFLAGS = -I $(builddir)
++libvlc_plugins_la_LDFLAGS = \
++	-avoid-version -module -shrext $(LIBEXT) \
++	-no-undefined \
++	$(BANK_COMPACT_UNWIND_FLAGS) \
++	$(BANK_EXPORT_FLAGS) \
++	$(top_builddir)/compat/libcompat.la $(LTLIBVLCCORE) \
++	$(foreach p,$(VLC_PLUGINS),$(filter-out %.la,$(lib$(notdir $(p))_la_LIBADD)))
++# The partial objects carry the plugins' code but not their dependencies: in a
++# dynamic build libtool does not record statically linked dependencies in the
++# .la files it writes, so dependencies.sh cannot find them. Each plugin's own
++# LIBADD names them, and it goes into LDFLAGS rather than LIBADD because
++# libtool puts LDFLAGS after LIBADD on the link line: the archive below is what
++# resolves the entry points, and the libraries it references have to come after
++# it.
++#
++# Only VLC's own convenience libraries (.la files in the build tree) are
++# filtered out: those are what libtool chokes on in this link. Everything the
++# linker actually needs has to stay -- -L/-l for the contrib libraries, and
++# framework flags like -framework DiskArbitration, which a statically linked
++# contrib does not carry with it. (-Wl,-t makes the linker list its inputs, so a
++# failure here can be read off the log instead of guessed at.)
++libvlc_plugins_la_LIBADD = libvlc_static_modules.la
++libvlc_plugins_la_DEPENDENCIES = libvlc_static_modules.la vlc_modules_manifest.h
+ endif
+diff --git a/src/modules/bank.c b/src/modules/bank.c
+index 57d458c991..27dc33a0e9 100644
+--- a/src/modules/bank.c
++++ b/src/modules/bank.c
+@@ -189,20 +189,95 @@ static vlc_plugin_t *module_InitStatic(vlc_plugin_cb entry)
+ VLC_WEAK
+ extern const vlc_plugin_cb vlc_static_modules[];
+ 
+-static void module_InitStaticModules(void)
++/* Eriri: a plugin bank is a single module holding every plugin, installed
++ * alongside the plugins. Loading it once is what keeps a playback closure from
++ * mapping one file per plugin: the kernel validates the embedded signature of
++ * every newly mapped file, and that cost is per file rather than per byte
++ * (measured: ~0.6 s per plugin on a cold cache, 2-3 ms once warm). The bank is
++ * optional -- without it everything here behaves exactly as before. */
++#if defined(_WIN32)
++# define VLC_PLUGIN_BANK_FILE "libvlc_plugins.dll"
++#elif defined(__APPLE__)
++# define VLC_PLUGIN_BANK_FILE "libvlc_plugins.dylib"
++#else
++# define VLC_PLUGIN_BANK_FILE "libvlc_plugins.so"
++#endif
++
++static const vlc_plugin_cb *module_TryPluginBank(const char *dir)
+ {
+-    if (!vlc_static_modules)
+-        return;
++    char *path;
++
++    if (unlikely(asprintf(&path, "%s" DIR_SEP VLC_PLUGIN_BANK_FILE, dir) == -1))
++        return NULL;
++
++    void *handle = vlc_dlopen(path, false);
++    free(path);
++    if (handle == NULL)
++        return NULL;
+ 
+-    for (unsigned i = 0; vlc_static_modules[i]; i++)
++    const vlc_plugin_cb *bank =
++        (const vlc_plugin_cb *)vlc_dlsym(handle, "vlc_static_modules");
++    if (bank == NULL)
+     {
+-        vlc_plugin_t *lib = module_InitStatic(vlc_static_modules[i]);
++        vlc_dlclose(handle);
++        return NULL;
++    }
++    return bank;
++}
++
++static const vlc_plugin_cb *module_OpenPluginBank(void)
++{
++    /* The bank is installed next to the other VLC libraries, so ask for that
++     * directory first: it follows VLC_LIB_PATH when the tree is relocated,
++     * exactly like the plugins directory does. */
++    char *dir = config_GetSysPath(VLC_PKG_LIB_DIR, NULL);
++    const vlc_plugin_cb *bank = NULL;
++
++    if (dir != NULL)
++    {
++        bank = module_TryPluginBank(dir);
++        free(dir);
++    }
++
++    /* Also accept it in a plugin directory, where a package may prefer it. */
++    const char *env = getenv("VLC_PLUGIN_PATH");
++    char *paths = (bank == NULL && env != NULL) ? strdup(env) : NULL;
++
++    if (paths != NULL)
++    {
++        for (char *buf, *path = strtok_r(paths, PATH_SEP, &buf);
++             path != NULL;
++             path = strtok_r(NULL, PATH_SEP, &buf))
++        {
++            bank = module_TryPluginBank(path);
++            if (bank != NULL)
++                break;
++        }
++        free(paths);
++    }
++
++    return bank;
++}
++
++static bool module_InitStaticModules(void)
++{
++    const vlc_plugin_cb *list = vlc_static_modules;
++
++    if (list == NULL)
++        list = module_OpenPluginBank();
++    if (list == NULL)
++        return false;
++
++    for (unsigned i = 0; list[i]; i++)
++    {
++        vlc_plugin_t *lib = module_InitStatic(list[i]);
+         if (likely(lib != NULL))
+             vlc_plugin_store(lib);
+     }
++    return true;
+ }
+ #else
+-static void module_InitStaticModules(void) { }
++static bool module_InitStaticModules(void) { return false; }
+ #endif
+ 
+ #ifdef HAVE_DYNAMIC_PLUGINS
+@@ -893,10 +968,28 @@ void module_LoadPlugins(libvlc_int_t *obj)
+ 
+     if (modules.usage == 1)
+     {
+-        module_InitStaticModules ();
++        /* Asking for the plugin cache to be rebuilt means enumerating the
++         * plug-ins, so that request has to reach the plugin directory instead
++         * of the bank. vlc-cache-gen relies on this. */
++        bool banked = !var_InheritBool (obj, "reset-plugins-cache")
++                   && module_InitStaticModules ();
+ #ifdef HAVE_DYNAMIC_PLUGINS
+-        msg_Dbg (obj, "searching plug-in modules");
+-        AllocateAllPlugins (obj);
++        if (banked)
++            msg_Dbg (obj, "registered modules from the plug-in bank");
++        else
++        {
++#ifdef HAVE_PLUGIN_BANK
++            /* A build that has a bank normally has no plug-in directory
++             * either, so this is the one case where the process ends up with
++             * no modules at all: say so instead of letting it be silent. */
++            msg_Warn (obj, "no plug-in bank found: falling back to the plug-in "
++                      "directory, which a bank build normally does not have");
++#endif
++            msg_Dbg (obj, "searching plug-in modules");
++            AllocateAllPlugins (obj);
++        }
++#else
++        (void) banked;
+ #endif
+         config_UnsortConfig ();
+         config_SortConfig ();
+-- 
+2.56.0
+

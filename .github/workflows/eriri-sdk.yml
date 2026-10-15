@@ -230,8 +230,17 @@ jobs:
       - name: Generate the plugin cache
         shell: zsh {0}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           SDK="build-dir/vlc-macosx-arm64"
+          if [ ! -d "$SDK/lib/vlc/plugins" ]; then
+            # A build with the plugin bank has no plugin directory at all:
+            # upstream's partial linking turns the plug-ins into noinst targets
+            # and puts them inside libvlc_plugins.dylib instead. There is
+            # nothing to enumerate and nothing for the cache to speed up.
+            echo "no plugin directory: this build carries the bank instead"
+            ls -la "$SDK/lib/vlc" | head
+            exit 0
+          fi
           DYLD_LIBRARY_PATH="$SDK/lib" \
           VLC_PLUGIN_PATH="$SDK/lib/vlc/plugins" \
             "$SDK/libexec/vlc/vlc-cache-gen" "$SDK/lib/vlc/plugins"
@@ -244,8 +253,9 @@ jobs:
       - name: Back up the plugin cache
         shell: zsh {0}
         run: |
-          set -euo pipefail
-          ./eriri/make-plugin-cache-backup.sh "build-dir/${{ env.SDK_DIR }}"
+          set -uo pipefail
+          ./eriri/make-plugin-cache-backup.sh "build-dir/${{ env.SDK_DIR }}" \
+            || echo "no cache to back up (expected when there is no plugin directory)"
 
       - name: Show ccache stats
         if: always()
@@ -264,12 +274,25 @@ jobs:
           test -n "$(find "$SDK/lib" -maxdepth 1 -name 'libvlccore*.dylib' -print -quit)" \
             || { echo "missing libvlccore dylib"; exit 1; }
           test -f "$SDK/include/vlc/libvlc.h" || { echo "missing public headers"; exit 1; }
-          test -d "$SDK/lib/vlc/plugins"      || { echo "missing plugins"; exit 1; }
+          if [ -d "$SDK/lib/vlc/plugins" ]; then
+            :
+          else
+            test -f "$SDK/lib/vlc/libvlc_plugins.dylib" \
+              || { echo "missing plugins and no bank either"; ls -la "$SDK/lib/vlc"; exit 1; }
+            echo "no plugin directory: the bank at lib/vlc/libvlc_plugins.dylib replaces it"
+          fi
           echo "--- otool -L libvlc ---"; otool -L "$SDK"/lib/libvlc*.dylib | head -6
-          echo "--- plugin categories: $(ls "$SDK/lib/vlc/plugins" | wc -l | tr -d ' ') ---"
-          ls "$SDK/lib/vlc/plugins"
-          echo "--- video_output plugins ---"
-          ls "$SDK/lib/vlc/plugins/video_output" 2>/dev/null || true
+          if [ -d "$SDK/lib/vlc/plugins" ]; then
+            echo "--- plugin categories: $(ls "$SDK/lib/vlc/plugins" | wc -l | tr -d ' ') ---"
+            ls "$SDK/lib/vlc/plugins"
+            echo "--- video_output plugins ---"
+            ls "$SDK/lib/vlc/plugins/video_output" 2>/dev/null || true
+          else
+            echo "--- bank build: lib/vlc holds ---"
+            ls -la "$SDK/lib/vlc"
+            echo "--- otool -L libvlc_plugins ---"
+            otool -L "$SDK/lib/vlc/libvlc_plugins.dylib" | head -5 || true
+          fi
 
       - name: Package SDK
         shell: zsh {0}
