@@ -1,0 +1,68 @@
+From 28f17853aa621aa19c5fd7cce054db42b1954fa9 Mon Sep 17 00:00:00 2001
+From: Eriri CI <eriri-ci@localhost>
+Date: Fri, 16 Oct 2026 04:53:49 +0800
+Subject: [PATCH] medialibrary: handle worker-thread exceptions instead of
+ dying on them
+
+The library reports an exception escaping one of its worker threads (the
+discoverer, a parser, the notifier, the thumbnailer) through
+IMediaLibraryCb::onUnhandledException, and rethrows it when that returns
+false. Its default implementation returns false, and nothing here overrode
+it, so any such exception -- a UNIQUE violation on Folder(path, device_id)
+is the one seen in practice -- called std::terminate and killed the whole
+application.
+
+Return true and log it instead. The worker thread stops either way, but the
+rest of the application survives and the media library works again after a
+restart.
+---
+ modules/misc/medialibrary/medialibrary.cpp | 17 +++++++++++++++++
+ modules/misc/medialibrary/medialibrary.h   |  4 ++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/modules/misc/medialibrary/medialibrary.cpp b/modules/misc/medialibrary/medialibrary.cpp
+index 9e7ac1732b..726514bfdb 100644
+--- a/modules/misc/medialibrary/medialibrary.cpp
++++ b/modules/misc/medialibrary/medialibrary.cpp
+@@ -283,6 +283,23 @@ void MediaLibrary::onDiscoveryProgress( const std::string& entryPoint )
+     m_vlc_ml->cbs->pf_send_event( m_vlc_ml, &ev );
+ }
+ 
++bool MediaLibrary::onUnhandledException( const char* context, const char* errMsg,
++                                         bool clearSuggested )
++{
++    /*
++     * Eriri: the media library calls this from the worker thread the exception
++     * came from (the discoverer, a parser, the notifier, the thumbnailer), and
++     * rethrows it if we return false -- which is the library's default, and
++     * which calls std::terminate and takes the whole process down with it.
++     *
++     * The thread stops either way, so report the error and keep the rest of the
++     * application alive; the media library is usable again after a restart.
++     */
++    msg_Err( m_vlc_ml, "media library unhandled exception (%s): %s%s", context, errMsg,
++             clearSuggested ? " [database reset suggested]" : "" );
++    return true;
++}
++
+ void MediaLibrary::onDiscoveryCompleted()
+ {
+     vlc_ml_event_t ev;
+diff --git a/modules/misc/medialibrary/medialibrary.h b/modules/misc/medialibrary/medialibrary.h
+index 8bcbd78412..b18c471170 100644
+--- a/modules/misc/medialibrary/medialibrary.h
++++ b/modules/misc/medialibrary/medialibrary.h
+@@ -230,6 +230,10 @@ public:
+                                bool success) override;
+     void onHistoryChanged( medialibrary::HistoryType historyType ) override;
+     void onRescanStarted() override;
++    /* Eriri: the library's default returns false, which rethrows the exception
++     * and ends up calling std::terminate from a worker thread. */
++    bool onUnhandledException( const char* context, const char* errMsg,
++                               bool clearSuggested ) override;
+ 
+     // TODO Will be exposed once subscriptions are integrated.
+     void onSubscriptionsAdded( std::vector<medialibrary::SubscriptionPtr> ) override {}
+-- 
+2.56.0
+
