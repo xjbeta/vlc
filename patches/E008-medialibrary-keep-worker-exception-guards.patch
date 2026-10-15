@@ -1,0 +1,47 @@
+From 1ac2d808d37a293ecf86570f33321cdc75df58ef Mon Sep 17 00:00:00 2001
+From: Eriri CI <eriri-ci@localhost>
+Date: Fri, 16 Oct 2026 04:24:01 +0800
+Subject: [PATCH] contrib/medialibrary: keep the worker-thread exception guards
+ in
+
+medialibrary's include/Common.h defines ML_UNHANDLED_EXCEPTION_INIT and
+ML_UNHANDLED_EXCEPTION_BODY -- the only thing that stops a sqlite error from
+escaping the discoverer, parser, notifier and thumbnailer threads and calling
+std::terminate -- behind #ifdef NDEBUG, and its meson.build declares that as
+b_ndebug=if-release. VLC's contrib builds meson packages with --buildtype
+debug or debugoptimized, neither of which defines NDEBUG, so the guards were
+compiled out: any sqlite error in one of those threads killed the application
+(a UNIQUE violation on Folder(path, device_id) is the one seen in practice).
+The parser thread only survived because of the 0001 patch in this directory.
+
+b_ndebug=true on the command line overrides the project default, which is what
+the library asks for in a release build.
+---
+ contrib/src/medialibrary/rules.mak | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/contrib/src/medialibrary/rules.mak b/contrib/src/medialibrary/rules.mak
+index d3a18d1685..b0c7b665a3 100644
+--- a/contrib/src/medialibrary/rules.mak
++++ b/contrib/src/medialibrary/rules.mak
+@@ -25,6 +25,16 @@ medialibrary: medialibrary-$(MEDIALIBRARY_VERSION).tar.bz2 .sum-medialibrary
+ 
+ .medialibrary: medialibrary crossfile.meson
+ 	$(MESONCLEAN)
+-	$(MESON) -Dlibvlc=disabled -Dlibtool_workaround=true
++	# Eriri: keep the library's worker-thread exception guards in.
++	#
++	# include/Common.h puts ML_UNHANDLED_EXCEPTION_INIT/BODY -- the only thing
++	# that keeps a sqlite error from escaping the discoverer, parser, notifier
++	# and thumbnailer threads and calling std::terminate -- behind #ifdef
++	# NDEBUG, and meson.build declares it as b_ndebug=if-release. VLC's contrib
++	# builds meson packages with --buildtype debug/debugoptimized, so the guards
++	# were compiled out and any such error killed the whole application; the
++	# parser thread only survived because of the 0001 patch above. Forcing
++	# b_ndebug on restores what the library intends for a release build.
++	$(MESON) -Dlibvlc=disabled -Dlibtool_workaround=true -Db_ndebug=true
+ 	+$(MESONBUILD)
+ 	touch $@
+-- 
+2.56.0
+
