@@ -1,0 +1,70 @@
+From 03356eaa7e604eb0af7257c934a27d24e313879a Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Fri, 16 Oct 2026 16:58:41 +0800
+Subject: [PATCH] eriri-sdk: take the static module table from the
+ partial-linked plugins (E010)
+
+A static build with --enable-vlc requires --enable-partial-linking, which merges
+the plugins into lib/vlc/libvlc_static_modules.a and leaves lib/vlc/plugins empty.
+build.sh scans that directory for plugin archives, so it would emit an empty
+module table and a full-static archive with no plugin in it.
+---
+ extras/package/apple/build.sh | 39 ++++++++++++++++++++++++++++-------
+ 1 file changed, 31 insertions(+), 8 deletions(-)
+
+diff --git a/extras/package/apple/build.sh b/extras/package/apple/build.sh
+index 90e5893396..81fe5fe800 100755
+--- a/extras/package/apple/build.sh
++++ b/extras/package/apple/build.sh
+@@ -898,17 +898,40 @@ touch "$VLC_STATIC_FILELIST_NAME"
+ VLC_PLUGINS_SYMBOL_LIST=()
+ 
+ # Find all static plugins in build dir
+-while IFS=  read -r -d $'\0' plugin_path; do
+-    # Get module entry point symbol name (_vlc_entry__MODULEFULLNAME)
+-    nm_symbol_output=( $(${VLC_HOST_NM} "$plugin_path" | grep _vlc_entry__) ) \
+-      || abort_err "Failed to find module entry function in '$plugin_path'"
++#
++# Eriri: the SDK is built with --enable-vlc (the medialibrary needs BUILD_VLC),
++# and a static build with --enable-vlc requires --enable-partial-linking
++# (configure rejects the combination otherwise). Partial linking merges the
++# plugins into lib/vlc/libvlc_static_modules.a instead of installing them one by
++# one -- lib/vlc/plugins is then empty, so the loop below would produce an empty
++# module table and an archive holding no plugin at all. Take the entry points and
++# the archive from libvlc_static_modules.a when it is there.
++VLC_STATIC_MODULES_LIB="$VLC_INSTALL_DIR/lib/vlc/libvlc_static_modules.a"
++if [ -f "$VLC_STATIC_MODULES_LIB" ]; then
++    echo "Using the partially-linked plugins: $VLC_STATIC_MODULES_LIB"
++
++    while IFS= read -r symbol_name; do
++        VLC_PLUGINS_SYMBOL_LIST+=( "$symbol_name" )
++    done < <(${VLC_HOST_NM} -gU "$VLC_STATIC_MODULES_LIB" \
++             | awk '$2 == "T" && $3 ~ /^_vlc_entry__/ { s = $3; sub(/^_/, "", s); print s }')
++
++    [ "${#VLC_PLUGINS_SYMBOL_LIST[@]}" -gt 0 ] \
++      || abort_err "No module entry point in '$VLC_STATIC_MODULES_LIB'"
++
++    echo "$VLC_STATIC_MODULES_LIB" >> "$VLC_STATIC_FILELIST_NAME"
++else
++    while IFS=  read -r -d $'\0' plugin_path; do
++        # Get module entry point symbol name (_vlc_entry__MODULEFULLNAME)
++        nm_symbol_output=( $(${VLC_HOST_NM} "$plugin_path" | grep _vlc_entry__) ) \
++          || abort_err "Failed to find module entry function in '$plugin_path'"
+ 
+-    symbol_name="${nm_symbol_output[2]:1}"
+-    VLC_PLUGINS_SYMBOL_LIST+=( "$symbol_name" )
++        symbol_name="${nm_symbol_output[2]:1}"
++        VLC_PLUGINS_SYMBOL_LIST+=( "$symbol_name" )
+ 
+-    echo "$plugin_path" >> "$VLC_STATIC_FILELIST_NAME"
++        echo "$plugin_path" >> "$VLC_STATIC_FILELIST_NAME"
+ 
+-done < <(find "$VLC_INSTALL_DIR/lib/vlc/plugins" -name "*.a" -print0)
++    done < <(find "$VLC_INSTALL_DIR/lib/vlc/plugins" -name "*.a" -print0)
++fi
+ 
+ # Generate code with module list
+ VLC_STATIC_MODULELIST_NAME="static-module-list"
+-- 
+2.56.0
+
