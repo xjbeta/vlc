@@ -137,16 +137,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-vlc-tools-
 
-      # 2) Incremental VLC compile tree. Rolling key so patch edits reuse the
-      #    previous tree; make recompiles only the files our patches touched.
+      # 2) Incremental VLC compile tree. The key carries a fingerprint of the
+      #    configure inputs: a flag change (the deployment target, a module
+      #    option) does not touch any source file, so make would happily reuse
+      #    objects built with the previous flags and the SDK would silently
+      #    advertise the old value. Patch edits still reuse the tree, because
+      #    those do move file timestamps.
       - name: Restore VLC build
         id: cache-build
         uses: actions/cache/restore@v4
         with:
           path: build-dir/build
-          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ github.run_id }}
+          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ hashFiles('eriri/vlc.conf', 'eriri/contrib.conf', 'extras/package/apple/build.conf') }}-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-vlc-build-${{ env.ARCH }}-
+            ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ hashFiles('eriri/vlc.conf', 'eriri/contrib.conf', 'extras/package/apple/build.conf') }}-
 
       # 3) ccache (wired in via VLC_CCACHE_BINS_PATH below).
       - name: Restore ccache
@@ -358,7 +362,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: build-dir/build
-          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ github.run_id }}
+          key: ${{ runner.os }}-vlc-build-${{ env.ARCH }}-${{ hashFiles('eriri/vlc.conf', 'eriri/contrib.conf', 'extras/package/apple/build.conf') }}-${{ github.run_id }}
 
       - name: Save ccache
         if: always() && steps.cache-ccache.outputs.cache-hit != 'true'
