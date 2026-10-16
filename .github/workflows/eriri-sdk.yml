@@ -133,7 +133,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: extras/tools/build
-          key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
+          key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am', 'extras/tools/tools.mak') }}
           restore-keys: |
             ${{ runner.os }}-vlc-tools-
 
@@ -354,7 +354,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: extras/tools/build
-          key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am') }}
+          key: ${{ runner.os }}-vlc-tools-${{ hashFiles('extras/tools/bootstrap', 'extras/tools/Makefile.am', 'extras/tools/tools.mak') }}
 
       - name: Save VLC build
         if: always() && steps.cache-build.outputs.cache-hit != 'true'
