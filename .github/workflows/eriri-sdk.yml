@@ -1,14 +1,28 @@
-# Build the Eriri VLC macOS SDK (shared libvlc + plugins) on the eriri-sdk branch.
+# Build the Eriri VLC macOS SDK (one libvlc.framework holding every plugin) on
+# the eriri-sdk branch.
 #
-# Produces the same layout the app consumes at Eriri/vlc-macos-sdk:
+# Produces the layout the app consumes at Eriri/vlc-macos-sdk:
 #   <workspace>/build-dir/vlc-macosx-aarch64/{bin,include,lib,share}
+# where lib/ carries libvlc.framework instead of a plugin directory.
 #
-# It uses VLC's own Apple helper, which supports a shared build (the "full
-# static library" note at the top of build.sh is stale):
-#   extras/package/apple/build.sh --arch=aarch64 --sdk=macosx --enable-shared
-# With --enable-shared the script runs `make install` and exits before the
-# static bundling / module stripping, i.e. it emits exactly the official SDK
-# shape (dylibs + lib/vlc/plugins).
+# It drives VLC's own Apple helper in its *static* mode:
+#   extras/package/apple/build.sh --arch=aarch64 --sdk=macosx
+# Without --enable-shared the script configures --disable-shared --enable-static,
+# merges every plugin (and its static dependencies) into
+# lib/vlc/libvlc_static_modules.a, and then folds that together with libvlc.a,
+# libvlccore.a and the contribs into lib/libvlc-full-static.a. This is the shape
+# VLCKit ships, and it is what lets the app map one file at startup instead of
+# ~380 plugin dylibs.
+#
+# eriri/make-vlc-framework.sh then links libvlc-full-static.a into
+# lib/libvlc.framework, which exposes VLC's C API directly (Headers/vlc/*.h and
+# a modulemap for `import libvlc`).
+#
+# Deliberately not used: -Wl,-no_compact_unwind. On arm64 that strips both
+# __unwind_info and __eh_frame, so a C++ exception thrown inside a plugin can no
+# longer unwind into its handler (__cxa_throw -> failed_throw -> std::terminate).
+# The static archive links with the compact unwind table intact, so plugin code
+# that throws and catches (medialibrary, for one) behaves.
 #
 # Eriri patches (e.g. the samplebufferdisplay black-bars fix) live as mail
 # patches in patches/ and are applied to the tree before building, so the
@@ -198,7 +212,7 @@ jobs:
           "$CCACHE_BIN" --version | head -1
 
       # ---------------------------------------------------------------- build
-      - name: Build macOS SDK (shared)
+      - name: Build macOS SDK (static)
         shell: zsh {0}
         run: |
           set -euo pipefail
@@ -211,51 +225,31 @@ jobs:
             PREBUILT=(--with-prebuilt-contribs
                       "VLC_PREBUILT_CONTRIBS_URL=${{ steps.prebuilt.outputs.url }}")
           fi
+          # No --enable-shared: this is the static build, which is what lets the
+          # SDK ship one libvlc.framework instead of a directory of plugins.
           ../extras/package/apple/build.sh \
             --arch=${{ env.ARCH }} \
             --sdk=${{ env.SDK }} \
-            --enable-shared \
             --config="$GITHUB_WORKSPACE/eriri/build.conf" \
             "${PREBUILT[@]}"
 
-      # VLC's own build only generates modules/plugins.dat when build == host,
-      # and that never holds here: the build triple carries the OS version
-      # (aarch64-apple-darwin25.6.0 vs aarch64-apple-darwin), so it prints
-      # "Cross-compilation: cache generation skipped!" and ships no cache.
-      #
-      # Without it every VLC process -- the app and each vlc-preparser helper --
-      # dlopens all ~380 plugins at startup, which takes over five seconds. The
-      # medialibrary's metadata preparser has a 5s timeout, so its helpers get
-      # killed before they finish starting and folder discovery stalls.
-      - name: Generate the plugin cache
+      # A static SDK carries every plugin inside lib/libvlc-full-static.a. Link
+      # it into one libvlc.framework so the app maps a single file at startup
+      # and needs no plugin directory. There is no plugin cache to generate
+      # either: nothing is dlopen()ed per plugin any more, which is exactly the
+      # ~5 s startup storm the cache used to paper over.
+      - name: Assemble libvlc.framework
         shell: zsh {0}
         run: |
-          set -uo pipefail
-          SDK="build-dir/vlc-macosx-arm64"
-          if [ ! -d "$SDK/lib/vlc/plugins" ]; then
-            # A build with the plugin bank has no plugin directory at all:
-            # upstream's partial linking turns the plug-ins into noinst targets
-            # and puts them inside libvlc_plugins.dylib instead. There is
-            # nothing to enumerate and nothing for the cache to speed up.
-            echo "no plugin directory: this build carries the bank instead"
-            ls -la "$SDK/lib/vlc" | head
-            exit 0
-          fi
-          DYLD_LIBRARY_PATH="$SDK/lib" \
-          VLC_PLUGIN_PATH="$SDK/lib/vlc/plugins" \
-            "$SDK/libexec/vlc/vlc-cache-gen" "$SDK/lib/vlc/plugins"
-          ls -la "$SDK/lib/vlc/plugins/plugins.dat"
-
-      # The backup is what vlc_cache_load() falls back on when plugins.dat
-      # cannot be read, so a copy or a clean-up that dropped the cache costs a
-      # few reads instead of the ~100 s dlopen storm.
-      # eriri/make-plugin-cache-backup.sh has the details.
-      - name: Back up the plugin cache
-        shell: zsh {0}
-        run: |
-          set -uo pipefail
-          ./eriri/make-plugin-cache-backup.sh "build-dir/${{ env.SDK_DIR }}" \
-            || echo "no cache to back up (expected when there is no plugin directory)"
+          set -euo pipefail
+          SDK="build-dir/${{ env.SDK_DIR }}"
+          ./eriri/make-vlc-framework.sh "$SDK"
+          ls -la "$SDK/lib"
+          echo "--- framework binary ---"
+          ls -la "$SDK/lib/libvlc.framework/Versions/A/libvlc"
+          echo "--- unwind tables (must include __unwind_info) ---"
+          otool -l "$SDK/lib/libvlc.framework/Versions/A/libvlc" \
+            | grep -E 'sectname __(unwind_info|eh_frame)' || true
 
       - name: Show ccache stats
         if: always()
@@ -268,31 +262,41 @@ jobs:
         run: |
           set -euo pipefail
           SDK="build-dir/${{ env.SDK_DIR }}"
+          BIN="$SDK/lib/libvlc.framework/Versions/A/libvlc"
           if [ ! -d "$SDK" ]; then echo "missing SDK dir: $SDK"; ls -la build-dir; exit 1; fi
-          test -n "$(find "$SDK/lib" -maxdepth 1 -name 'libvlc*.dylib' -print -quit)" \
-            || { echo "missing libvlc dylib"; ls -la "$SDK/lib"; exit 1; }
-          test -n "$(find "$SDK/lib" -maxdepth 1 -name 'libvlccore*.dylib' -print -quit)" \
-            || { echo "missing libvlccore dylib"; exit 1; }
           test -f "$SDK/include/vlc/libvlc.h" || { echo "missing public headers"; exit 1; }
-          if [ -d "$SDK/lib/vlc/plugins" ]; then
-            :
-          else
-            test -f "$SDK/lib/vlc/libvlc_plugins.dylib" \
-              || { echo "missing plugins and no bank either"; ls -la "$SDK/lib/vlc"; exit 1; }
-            echo "no plugin directory: the bank at lib/vlc/libvlc_plugins.dylib replaces it"
-          fi
-          echo "--- otool -L libvlc ---"; otool -L "$SDK"/lib/libvlc*.dylib | head -6
-          if [ -d "$SDK/lib/vlc/plugins" ]; then
-            echo "--- plugin categories: $(ls "$SDK/lib/vlc/plugins" | wc -l | tr -d ' ') ---"
-            ls "$SDK/lib/vlc/plugins"
-            echo "--- video_output plugins ---"
-            ls "$SDK/lib/vlc/plugins/video_output" 2>/dev/null || true
-          else
-            echo "--- bank build: lib/vlc holds ---"
-            ls -la "$SDK/lib/vlc"
-            echo "--- otool -L libvlc_plugins ---"
-            otool -L "$SDK/lib/vlc/libvlc_plugins.dylib" | head -5 || true
-          fi
+          test -f "$BIN" || { echo "missing framework binary: $BIN"; ls -la "$SDK/lib"; exit 1; }
+          test -f "$SDK/lib/libvlc.framework/Versions/A/Modules/module.modulemap" \
+            || { echo "missing framework modulemap"; exit 1; }
+
+          # The app links -lvlc and -lvlccore against lib/, so both names must
+          # still resolve even though only one binary exists.
+          for n in libvlc.dylib libvlccore.dylib; do
+            test -e "$SDK/lib/$n" || { echo "missing $n"; exit 1; }
+          done
+
+          # No plugin directory: every plugin lives inside the framework.
+          test ! -d "$SDK/lib/vlc/plugins" \
+            || { echo "unexpected plugin directory in a static build"; exit 1; }
+
+          # The whole point of the framework link: keep the compact unwind table
+          # so C++ exceptions raised in a plugin can unwind into their handler.
+          otool -l "$BIN" | grep -q 'sectname __unwind_info' \
+            || { echo "framework has no __unwind_info: plugin C++ exceptions would abort"; exit 1; }
+
+          api=$(nm -gU "$BIN" | grep -c '_libvlc_' || true)
+          mods=$(nm "$BIN" | grep -c ' _vlc_static_modules$' || true)
+          entries=$(nm "$BIN" | grep -c '_vlc_entry_' || true)
+          echo "exported libvlc_ symbols: $api"
+          echo "vlc_static_modules:       $mods"
+          echo "plugin entry points:      $entries"
+          [ "$api" -gt 100 ] || { echo "too few exported libvlc symbols"; exit 1; }
+          [ "$mods" -ge 1 ] || { echo "module table not linked in"; exit 1; }
+          [ "$entries" -gt 300 ] || { echo "too few plugin entry points"; exit 1; }
+
+          echo "--- framework ---"; ls -la "$SDK/lib/libvlc.framework/Versions/A"
+          echo "--- otool -L framework binary ---"; otool -L "$BIN" | head -8
+          echo "--- headers ---"; ls "$SDK/lib/libvlc.framework/Versions/A/Headers/vlc" | head -5
 
       - name: Package SDK
         shell: zsh {0}
