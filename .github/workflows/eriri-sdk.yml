@@ -238,18 +238,22 @@ jobs:
       # and needs no plugin directory. There is no plugin cache to generate
       # either: nothing is dlopen()ed per plugin any more, which is exactly the
       # ~5 s startup storm the cache used to paper over.
-      - name: Assemble libvlc.framework
+      - name: Assemble libvlc.xcframework
         shell: zsh {0}
         run: |
           set -euo pipefail
           SDK="build-dir/${{ env.SDK_DIR }}"
           ./eriri/make-vlc-framework.sh "$SDK"
-          ls -la "$SDK/lib"
-          echo "--- framework binary ---"
-          ls -la "$SDK/lib/libvlc.framework/Versions/A/libvlc"
+          echo "--- SDK lib/ ---"; ls -la "$SDK/lib"
+          BIN="$SDK/lib/libvlc.xcframework/macos-arm64/libvlc.framework/Versions/A/libvlc"
+          echo "--- framework binary ---"; ls -la "$BIN"
           echo "--- unwind tables (must include __unwind_info) ---"
-          otool -l "$SDK/lib/libvlc.framework/Versions/A/libvlc" \
-            | grep -E 'sectname __(unwind_info|eh_frame)' || true
+          otool -l "$BIN" | grep -E 'sectname __(unwind_info|eh_frame)' || true
+          echo "--- deployment target ---"
+          otool -l "$BIN" | awk '/minos/ { print "  minos " $2; exit }'
+          echo "--- exports ---"
+          printf '  libvlc_ symbols: %s\n' "$(nm -gU "$BIN" | grep -c '_libvlc_')"
+          printf '  module table:    %s\n' "$(nm "$BIN" | grep -c ' _vlc_static_modules$')"
 
       - name: Show ccache stats
         if: always()
@@ -262,12 +266,24 @@ jobs:
         run: |
           set -euo pipefail
           SDK="build-dir/${{ env.SDK_DIR }}"
-          BIN="$SDK/lib/libvlc.framework/Versions/A/libvlc"
+          XCF="$SDK/lib/libvlc.xcframework"
+          SLICE="$XCF/macos-arm64/libvlc.framework"
+          BIN="$SLICE/Versions/A/libvlc"
           if [ ! -d "$SDK" ]; then echo "missing SDK dir: $SDK"; ls -la build-dir; exit 1; fi
           test -f "$SDK/include/vlc/libvlc.h" || { echo "missing public headers"; exit 1; }
+          test -d "$XCF" || { echo "missing $XCF"; ls -la "$SDK/lib"; exit 1; }
           test -f "$BIN" || { echo "missing framework binary: $BIN"; ls -la "$SDK/lib"; exit 1; }
-          test -f "$SDK/lib/libvlc.framework/Versions/A/Modules/module.modulemap" \
+          test -f "$SLICE/Versions/A/Modules/module.modulemap" \
             || { echo "missing framework modulemap"; exit 1; }
+
+          # The framework must advertise the deployment target the SDK was built
+          # for, not the build machine's OS: without -mmacosx-version-min clang
+          # silently uses the host SDK's default.
+          WANT=$(grep -m1 'VLC_DEPLOYMENT_TARGET_MACOSX=' eriri/contrib.conf | sed 's/.*"\(.*\)"/\1/')
+          GOT=$(otool -l "$BIN" | awk '/minos/ { print $2; exit }')
+          echo "deployment target: framework $GOT, SDK $WANT"
+          [ "$GOT" = "$WANT" ] \
+            || { echo "framework minos $GOT does not match the SDK target $WANT"; exit 1; }
 
           # The app links -lvlc and -lvlccore against lib/, so both names must
           # still resolve even though only one binary exists.
@@ -294,9 +310,10 @@ jobs:
           [ "$mods" -ge 1 ] || { echo "module table not linked in"; exit 1; }
           [ "$entries" -gt 300 ] || { echo "too few plugin entry points"; exit 1; }
 
-          echo "--- framework ---"; ls -la "$SDK/lib/libvlc.framework/Versions/A"
+          echo "--- framework ---"; ls -la "$SLICE/Versions/A"
+          echo "--- xcframework ---"; plutil -p "$XCF/Info.plist"
           echo "--- otool -L framework binary ---"; otool -L "$BIN" | head -8
-          echo "--- headers ---"; ls "$SDK/lib/libvlc.framework/Versions/A/Headers/vlc" | head -5
+          echo "--- headers ---"; ls "$SLICE/Versions/A/Headers/vlc" | head -5
 
       - name: Package SDK
         shell: zsh {0}

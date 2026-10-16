@@ -40,14 +40,29 @@
 set -euo pipefail
 
 SDK="${1:?usage: make-vlc-framework.sh <sdk-dir>}"
-ARCHIVE="$SDK/lib/libvlc-full-static.a"
 API_ARCHIVE="$SDK/lib/libvlc.a"
 HEADERS="$SDK/include/vlc"
 DEST="$SDK/lib"
 
-[ -f "$ARCHIVE" ] || { echo "make-vlc-framework: missing $ARCHIVE" >&2; exit 1; }
+# build.sh leaves the merged archive in its own static-lib/ directory next to the
+# install dir, not inside it. Accept it in either place so the script works
+# whether or not something has already moved it.
+ARCHIVE=""
+for candidate in "$SDK/lib/libvlc-full-static.a" \
+                 "$(dirname "$SDK")/static-lib/libvlc-full-static.a"; do
+    if [ -f "$candidate" ]; then ARCHIVE="$candidate"; break; fi
+done
+if [ -z "$ARCHIVE" ]; then
+    echo "make-vlc-framework: cannot find libvlc-full-static.a" >&2
+    echo "  looked in $SDK/lib and $(dirname "$SDK")/static-lib" >&2
+    ls -la "$SDK/lib" >&2 || true
+    ls -la "$(dirname "$SDK")/static-lib" >&2 || true
+    exit 1
+fi
+
 [ -f "$API_ARCHIVE" ] || { echo "make-vlc-framework: missing $API_ARCHIVE" >&2; exit 1; }
 [ -d "$HEADERS" ] || { echo "make-vlc-framework: missing $HEADERS" >&2; exit 1; }
+echo "make-vlc-framework: archive $ARCHIVE"
 
 # Deployment target: take it from the objects VLC just built rather than
 # hardcoding it, so the framework keeps matching the rest of the SDK.
