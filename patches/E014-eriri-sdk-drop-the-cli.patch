@@ -1,6 +1,6 @@
-From ab1a565d1dbe6a0cd624b02b03270bb25264f203 Mon Sep 17 00:00:00 2001
+From c2fe404ca3ad46b56e5f191fa361346bc6fd89e9 Mon Sep 17 00:00:00 2001
 From: Eriri CI <eriri-ci@localhost>
-Date: Sat, 17 Oct 2026 05:06:01 +0800
+Date: Sat, 17 Oct 2026 05:25:32 +0800
 Subject: [PATCH] eriri-sdk: drop the CLI, keep partial linking (E014)
 
 The SDK ships no CLI. With --enable-vlc, bin/ builds a static vlc-osx and the
@@ -13,55 +13,35 @@ consequence of --enable-vlc. It is what localizes each plugin's non-entry
 symbols, and three plugins each embed their own JSON parser: without it the
 final link stops with duplicate _json_parse_error / _json_read.
 ---
- eriri/vlc.conf | 28 +++++++++++++++++-----------
- 1 file changed, 17 insertions(+), 11 deletions(-)
+ eriri/vlc.conf | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
 
 diff --git a/eriri/vlc.conf b/eriri/vlc.conf
-index c826ba7c4e..b0faf08a04 100644
+index bec097833a..4756d73ebe 100644
 --- a/eriri/vlc.conf
 +++ b/eriri/vlc.conf
-@@ -19,10 +19,14 @@ export VLC_CONFIG_OPTIONS_BASE=(
+@@ -19,13 +19,14 @@ export VLC_CONFIG_OPTIONS_BASE=(
      --enable-lua
      --disable-qt
      --disable-skins2
--    # Eriri: kept for parity with VLC's own macOS SDK, which builds the vlc
--    # binary and libexec/vlc/vlc-preparser. Note the out-of-process preparser
--    # itself is disabled below.
+-    # Eriri: upstream's Apple base options disable this, but the medialibrary
+-    # browses directories through the out-of-process preparser, which lives in
+-    # libexec/vlc/vlc-preparser and is only built when BUILD_VLC is true
+-    # (bin/preparser/Makefile.am). VLC's own macOS SDK builds it, and without it
+-    # discovery fails with "Failed to browse directory" / "Fail to create
+-    # Process in process_pool".
 -    --enable-vlc
 +    # Eriri: --disable-vlc. The SDK ships no CLI and nothing consumes one. With
-+    # it on, bin/ builds a static vlc-osx that the SDK may or may not end up
-+    # installing, depending on whether install-data-local wins its race against
-+    # install-exec-am -- so the SDK's own contents were not deterministic. The
-+    # medialibrary does not need it either: its preparser runs in-process (see
-+    # below). Partial linking, which is the part this build actually wanted from
-+    # --enable-vlc, is requested explicitly below.
++    # it on, bin/ builds a static vlc-osx and the SDK may or may not end up
++    # installing it, depending on whether install-data-local wins its race
++    # against install-exec-am -- so the SDK's own contents were not
++    # deterministic. The medialibrary does not need it either: it runs the
++    # preparser in-process. Partial linking, the one part of --enable-vlc this
++    # build actually wanted, is requested explicitly below.
 +    --disable-vlc
      --disable-vlm
      --disable-nls
      --disable-notify
-@@ -69,13 +73,15 @@ export VLC_CONFIG_OPTIONS_MACOSX=(
-     # is the IPC around it that breaks -- and VLCKit on Apple platforms uses
-     # the in-process path for the same reason.
-     --disable-external-preparser
--    # Eriri: the SDK is a static build (build.sh without --enable-shared), and a
--    # static build with --enable-vlc requires partial linking -- configure
--    # refuses the combination otherwise ("VLC requires partial linking to build
--    # with static plugins"). Partial linking merges every plugin and its static
--    # dependencies into lib/vlc/libvlc_static_modules.a, which build.sh then
--    # folds into lib/libvlc-full-static.a; eriri/make-vlc-framework.sh links
--    # that archive into one libvlc.framework.
-+    # Eriri: partial linking, requested explicitly. It merges every plugin and
-+    # its static dependencies into lib/vlc/libvlc_static_modules.a (so
-+    # lib/vlc/plugins is left empty and build.sh needs E010 to find the module
-+    # table there), and -- the reason it is not optional -- it localizes each
-+    # plugin's non-entry symbols. That is what stops the three plugins which
-+    # each embed their own JSON parser from colliding on _json_parse_error and
-+    # _json_read at the final link; without it ld64 stops with "2 duplicate
-+    # symbols". configure only insists on partial linking when --enable-vlc is
-+    # on, which is why the pairing is easy to lose by accident.
-     --enable-partial-linking
- )
- 
 -- 
 2.56.0
 
