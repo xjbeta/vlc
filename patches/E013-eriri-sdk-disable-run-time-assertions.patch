@@ -1,0 +1,36 @@
+From e107f46b90456f73a2517fe0919c986399496dbf Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sat, 17 Oct 2026 04:52:03 +0800
+Subject: [PATCH] eriri-sdk: turn off VLC's run-time assertions (E013)
+
+configure.ac defaults enable_debug to yes, so every assert() in VLC is live and
+aborts the host process rather than returning gracefully. SwiftVLC ships
+--disable-debug for the same reason; VLCKit does not, which is one more place a
+shipping app can die for a reason that is not the app's.
+
+This covers VLC's own code only. The medialibrary is a contrib built by the
+contrib system, so --disable-debug does not reach it: E008 stays.
+---
+ eriri/vlc.conf | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/eriri/vlc.conf b/eriri/vlc.conf
+index 9e5bdcfc5a..c826ba7c4e 100644
+--- a/eriri/vlc.conf
++++ b/eriri/vlc.conf
+@@ -10,6 +10,12 @@ export VLC_CONFIG_OPTIONS_BASE=(
+     --disable-vcd
+     --disable-macosx
+     --disable-macosx-avfoundation
++    # Eriri: upstream defaults to run-time assertions ENABLED (configure.ac:
++    # enable_debug="yes"), so any assert() in VLC aborts the host process instead
++    # of returning gracefully. SwiftVLC ships --disable-debug for the same
++    # reason. This defines NDEBUG for VLC's own code only -- the medialibrary is
++    # a contrib with its own build and keeps its exception guards via E008.
++    --disable-debug
+     --enable-lua
+     --disable-qt
+     --disable-skins2
+-- 
+2.56.0
+
