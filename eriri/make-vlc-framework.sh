@@ -1,11 +1,11 @@
 #!/bin/sh
 #
-# Assemble libvlc.framework from a *static* VLC SDK.
+# Assemble libvlc.xcframework from a *static* VLC SDK.
 #
 # A static SDK (build.sh without --enable-shared) ships every plugin inside
 # lib/libvlc-full-static.a instead of as one dylib per plugin. This script links
-# that archive into a single framework binary, so the app maps one file at
-# startup and needs no plugin directory at all.
+# that archive into a single framework binary and wraps it in an xcframework, so
+# the app maps one file at startup and needs no plugin directory at all.
 #
 # The framework exposes VLC's low-level C API directly (Headers/vlc/*.h plus a
 # modulemap), so `import libvlc` and `#include <vlc/vlc.h>` keep working; it is
@@ -24,12 +24,18 @@
 #   The rest of the archive is linked normally: it carries several copies of the
 #   same contrib objects (one per plugin that uses them), and letting the linker
 #   resolve by reference picks one copy each. -force_load on the whole archive
-#   fails with duplicate symbols.
+#   fails with duplicate symbols (the same reason harflabs/SwiftVLC ships a
+#   fix-duplicate-symbols.sh).
+#   -mmacosx-version-min    the deployment target is read back out of libvlc.a.
+#                           Without it clang uses the host SDK's default and the
+#                           framework ends up requiring the build machine's OS.
 #
-# Deliberately NOT used: -Wl,-no_compact_unwind. On arm64 that drops both
-# __unwind_info and __eh_frame, and then any C++ exception thrown in a plugin
-# fails to unwind into its handler ("failed_throw" -> std::terminate). The
-# static archive links fine with the compact unwind table intact.
+# Deliberately NOT used: -Wl,-no_compact_unwind. On arm64 that drops the compact
+# unwind table, and then any C++ exception thrown in a plugin fails to unwind
+# into its handler ("failed_throw" -> std::terminate). The static archive links
+# fine with the compact unwind table intact. (SwiftVLC's fix-duplicate-symbols.sh
+# documents the same hazard for nmedit: editing symbol tables can disturb
+# __eh_frame / __gcc_except_tab / __compact_unwind and break C++ catch frames.)
 #
 set -euo pipefail
 
@@ -37,10 +43,24 @@ SDK="${1:?usage: make-vlc-framework.sh <sdk-dir>}"
 ARCHIVE="$SDK/lib/libvlc-full-static.a"
 API_ARCHIVE="$SDK/lib/libvlc.a"
 HEADERS="$SDK/include/vlc"
+DEST="$SDK/lib"
 
 [ -f "$ARCHIVE" ] || { echo "make-vlc-framework: missing $ARCHIVE" >&2; exit 1; }
 [ -f "$API_ARCHIVE" ] || { echo "make-vlc-framework: missing $API_ARCHIVE" >&2; exit 1; }
 [ -d "$HEADERS" ] || { echo "make-vlc-framework: missing $HEADERS" >&2; exit 1; }
+
+# Deployment target: take it from the objects VLC just built rather than
+# hardcoding it, so the framework keeps matching the rest of the SDK.
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+( cd "$WORK" && ar -x "$API_ARCHIVE" >/dev/null 2>&1 || true )
+SAMPLE="$(ls "$WORK"/*.o 2>/dev/null | head -1 || true)"
+DEPLOYMENT_TARGET="12.0"
+if [ -n "$SAMPLE" ]; then
+    DETECTED="$(vtool -show-build "$SAMPLE" 2>/dev/null | awk '/minos/ { print $2; exit }')"
+    [ -n "$DETECTED" ] && DEPLOYMENT_TARGET="$DETECTED"
+fi
+echo "make-vlc-framework: deployment target $DEPLOYMENT_TARGET"
 
 # System frameworks the archive's code references. Taken from a working link of
 # this archive; VLCKit's own project lists the same set.
@@ -77,15 +97,15 @@ for f in $FRAMEWORKS; do
     FRAMEWORK_ARGS="$FRAMEWORK_ARGS -framework $f"
 done
 
-FW="$SDK/lib/libvlc.framework"
-BIN="$FW/Versions/A/libvlc"
-
-rm -rf "$FW"
-mkdir -p "$FW/Versions/A/Headers" "$FW/Versions/A/Modules" "$FW/Versions/A/Resources"
+# 1. The framework slice.
+SLICE="$WORK/libvlc.framework"
+BIN="$SLICE/Versions/A/libvlc"
+mkdir -p "$SLICE/Versions/A/Headers" "$SLICE/Versions/A/Modules" "$SLICE/Versions/A/Resources"
 
 echo "make-vlc-framework: linking $BIN"
 # shellcheck disable=SC2086
 clang++ -dynamiclib -o "$BIN" \
+    -mmacosx-version-min="$DEPLOYMENT_TARGET" \
     -Wl,-force_load,"$API_ARCHIVE" \
     -Wl,-u,_vlc_static_modules \
     -Wl,-install_name,@rpath/libvlc.framework/Versions/A/libvlc \
@@ -95,9 +115,9 @@ clang++ -dynamiclib -o "$BIN" \
     -lz -lbz2 -liconv -lresolv \
     "$ARCHIVE"
 
-cp -R "$HEADERS" "$FW/Versions/A/Headers/vlc"
+cp -R "$HEADERS" "$SLICE/Versions/A/Headers/vlc"
 
-cat > "$FW/Versions/A/Modules/module.modulemap" <<'EOF'
+cat > "$SLICE/Versions/A/Modules/module.modulemap" <<'EOF'
 // VLC's low-level C API, exposed to Swift as `import libvlc`.
 framework module libvlc {
     umbrella header "vlc/vlc.h"
@@ -106,7 +126,7 @@ framework module libvlc {
 }
 EOF
 
-cat > "$FW/Versions/A/Resources/Info.plist" <<'EOF'
+cat > "$SLICE/Versions/A/Resources/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -119,22 +139,31 @@ cat > "$FW/Versions/A/Resources/Info.plist" <<'EOF'
 	<key>CFBundlePackageType</key><string>FMWK</string>
 	<key>CFBundleShortVersionString</key><string>1.0</string>
 	<key>CFBundleVersion</key><string>1</string>
+	<key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
+	<key>MinimumOSVersion</key><string>__DEPLOYMENT_TARGET__</string>
 </dict>
 </plist>
 EOF
+sed -i '' "s/__DEPLOYMENT_TARGET__/$DEPLOYMENT_TARGET/" "$SLICE/Versions/A/Resources/Info.plist"
 
-# Framework version symlinks.
-ln -sfn Versions/Current/Headers   "$FW/Headers"
-ln -sfn Versions/Current/Modules   "$FW/Modules"
-ln -sfn Versions/Current/Resources "$FW/Resources"
-ln -sfn Versions/Current/libvlc    "$FW/libvlc"
-ln -sfn A                          "$FW/Versions/Current"
+ln -sfn Versions/Current/Headers   "$SLICE/Headers"
+ln -sfn Versions/Current/Modules   "$SLICE/Modules"
+ln -sfn Versions/Current/Resources "$SLICE/Resources"
+ln -sfn Versions/Current/libvlc    "$SLICE/libvlc"
+ln -sfn A                          "$SLICE/Versions/Current"
 
-# Compatibility shims: the app links -lvlc and -lvlccore against <sdk>/lib, and
-# both now resolve to the one framework binary (dyld loads it once). A static
-# VLC has no separate libvlccore, so the second name is just a second door into
-# the same file.
-ln -sfn libvlc.framework/Versions/A/libvlc "$SDK/lib/libvlc.dylib"
-ln -sfn libvlc.framework/Versions/A/libvlc "$SDK/lib/libvlccore.dylib"
+# 2. Wrap it in an xcframework, the format Xcode and SwiftPM expect.
+echo "make-vlc-framework: creating libvlc.xcframework"
+rm -rf "$DEST/libvlc.xcframework"
+xcodebuild -create-xcframework -framework "$SLICE" -output "$DEST/libvlc.xcframework" >/dev/null
 
-echo "make-vlc-framework: built $FW ($(stat -f%z "$BIN") bytes)"
+# 3. Compatibility shims. The app links -lvlc and -lvlccore against <sdk>/lib and
+#    records @rpath/libvlc.framework/Versions/A/libvlc, so leave that path
+#    resolvable inside the SDK as well. A static VLC has no separate libvlccore,
+#    so the second name is just a second door into the same file.
+SLICE_DIR="$(cd "$DEST/libvlc.xcframework" && ls -d macos-* | head -1)"
+ln -sfn "libvlc.xcframework/$SLICE_DIR/libvlc.framework" "$DEST/libvlc.framework"
+ln -sfn "libvlc.xcframework/$SLICE_DIR/libvlc.framework/Versions/A/libvlc" "$DEST/libvlc.dylib"
+ln -sfn "libvlc.xcframework/$SLICE_DIR/libvlc.framework/Versions/A/libvlc" "$DEST/libvlccore.dylib"
+
+echo "make-vlc-framework: built $DEST/libvlc.xcframework ($SLICE_DIR, $(stat -f%z "$DEST/libvlc.xcframework/$SLICE_DIR/libvlc.framework/Versions/A/libvlc") bytes)"
