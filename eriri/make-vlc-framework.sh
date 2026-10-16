@@ -40,6 +40,10 @@
 set -euo pipefail
 
 SDK="${1:?usage: make-vlc-framework.sh <sdk-dir>}"
+[ -d "$SDK" ] || { echo "make-vlc-framework: no such directory: $SDK" >&2; exit 1; }
+# The script cd's into a scratch directory to unpack archives, so a relative SDK
+# path would stop resolving half way through.
+SDK="$(cd "$SDK" && pwd)"
 API_ARCHIVE="$SDK/lib/libvlc.a"
 HEADERS="$SDK/include/vlc"
 DEST="$SDK/lib"
@@ -64,17 +68,31 @@ fi
 [ -d "$HEADERS" ] || { echo "make-vlc-framework: missing $HEADERS" >&2; exit 1; }
 echo "make-vlc-framework: archive $ARCHIVE"
 
-# Deployment target: take it from the objects VLC just built rather than
-# hardcoding it, so the framework keeps matching the rest of the SDK.
+# Deployment target: take it from the objects VLC just built, so the framework
+# keeps matching the rest of the SDK. Never guess silently -- a wrong value here
+# ships a framework that only runs on the build machine, which is exactly the
+# bug this check exists to catch.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-( cd "$WORK" && ar -x "$API_ARCHIVE" >/dev/null 2>&1 || true )
-SAMPLE="$(ls "$WORK"/*.o 2>/dev/null | head -1 || true)"
-DEPLOYMENT_TARGET="12.0"
+SAMPLE=""
+for archive in "$API_ARCHIVE" "$SDK/lib/libvlccore.a"; do
+    [ -f "$archive" ] || continue
+    ( cd "$WORK" && rm -f ./*.o && ar -x "$archive" ) >/dev/null 2>&1 || continue
+    SAMPLE="$(ls "$WORK"/*.o 2>/dev/null | head -1 || true)"
+    [ -n "$SAMPLE" ] && break
+done
+
+DEPLOYMENT_TARGET=""
 if [ -n "$SAMPLE" ]; then
-    DETECTED="$(vtool -show-build "$SAMPLE" 2>/dev/null | awk '/minos/ { print $2; exit }')"
-    [ -n "$DETECTED" ] && DEPLOYMENT_TARGET="$DETECTED"
+    DEPLOYMENT_TARGET="$(vtool -show-build "$SAMPLE" 2>/dev/null | awk '/minos/ { print $2; exit }')"
 fi
+if [ -z "$DEPLOYMENT_TARGET" ]; then
+    CONF="$(cd "$(dirname "$0")" && pwd)/contrib.conf"
+    DEPLOYMENT_TARGET="$(sed -n 's/.*VLC_DEPLOYMENT_TARGET_MACOSX="\([0-9.]*\)".*/\1/p' "$CONF" 2>/dev/null | head -1)"
+    echo "make-vlc-framework: WARNING could not read the target from the objects; using eriri/contrib.conf ($DEPLOYMENT_TARGET)" >&2
+fi
+[ -n "$DEPLOYMENT_TARGET" ] \
+    || { echo "make-vlc-framework: cannot determine the deployment target" >&2; exit 1; }
 echo "make-vlc-framework: deployment target $DEPLOYMENT_TARGET"
 
 # System frameworks the archive's code references. Taken from a working link of
