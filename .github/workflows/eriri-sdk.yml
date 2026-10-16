@@ -304,9 +304,15 @@ jobs:
           set -euo pipefail
           SDK="build-dir/${{ env.SDK_DIR }}"
           OUT="${{ env.JOB_NAME }}-${{ env.ARCH }}-${{ steps.rev.outputs.sha }}.tar.xz"
+          # The framework already holds every plugin. The archives that were only
+          # inputs to that link are ~1.2 GB of dead weight in the SDK.
+          rm -f "$SDK/lib/libvlc-full-static.a" \
+                "$SDK/lib/vlc/libvlc_static_modules.a" \
+                "$SDK/lib/vlc/libvlc_static_modules.la"
           tar -C "$(dirname "$SDK")" -cJf "$OUT" "$(basename "$SDK")"
           shasum -a 256 "$OUT" | tee "$OUT.sha256"
           echo "SDK_ARCHIVE=$OUT" >> "$GITHUB_ENV"
+          du -sh "$SDK"
 
       - name: Upload SDK
         uses: actions/upload-artifact@v4
